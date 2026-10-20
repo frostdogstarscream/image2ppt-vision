@@ -1,0 +1,146 @@
+{
+  "purpose": "Renderer-specific PIL-origin to final-PPTX text-origin calibration",
+  "renderer": "Artifact Tool active Windows runtime",
+  "source_canvas": [
+    1672,
+    941
+  ],
+  "target_canvas": [
+    1280,
+    720
+  ],
+  "curves": [
+    {
+      "family": "微软雅黑",
+      "bold": false,
+      "dx_source_px": 0,
+      "dy_slope": 0.058708,
+      "dy_intercept": 0.18375,
+      "size_range_px": [
+        8,
+        64
+      ],
+      "initial_residual_max_px": 1.0989,
+      "font_sha256": "d79c55e68b1131eea0cc1c47be4f572d964f28c682e143db2ad09c1e4cb07a3f"
+    },
+    {
+      "family": "微软雅黑",
+      "bold": true,
+      "dx_source_px": 0,
+      "dy_slope": 0.066797,
+      "dy_intercept": -0.059373,
+      "size_range_px": [
+        8,
+        64
+      ],
+      "initial_residual_max_px": 1.0309,
+      "font_sha256": "4508821b3dffe01f0ef5e5326a3e60df705a44633858811f67b6982dce3f6ee6"
+    },
+    {
+      "family": "等线",
+      "bold": false,
+      "dx_source_px": 0,
+      "dy_slope": -0.253256,
+      "dy_intercept": 1.675133,
+      "size_range_px": [
+        8,
+        32
+      ],
+      "initial_residual_max_px": 0.4756,
+      "font_sha256": "e051009b42b454352a90ae0c9b8adb58bbdbcd168768750b35bc3357510de141"
+    },
+    {
+      "family": "等线",
+      "bold": true,
+      "dx_source_px": 0,
+      "dy_slope": -0.222006,
+      "dy_intercept": 0.758467,
+      "size_range_px": [
+        8,
+        32
+      ],
+      "initial_residual_max_px": 0.1845,
+      "font_sha256": "236df24be867e527bdf810d00eb5c38f18244e776238a9f5ca937363267a9169"
+    },
+    {
+      "family": "黑体",
+      "bold": false,
+      "dx_source_px": 0,
+      "dy_slope": -0.181159,
+      "dy_intercept": 1.611725,
+      "size_range_px": [
+        8,
+        32
+      ],
+      "initial_residual_max_px": 0.6035,
+      "font_sha256": "9b1959db3b3abeb7efdaec26edf7dfe871a6039de8d614af7248575207be629e"
+    },
+    {
+      "family": "宋体",
+      "bold": false,
+      "dx_source_px": 0,
+      "dy_slope": -0.118659,
+      "dy_intercept": 0.278392,
+      "size_range_px": [
+        8,
+        32
+      ],
+      "initial_residual_max_px": 0.8701,
+      "font_sha256": "1526ac24375f51f6eb73bc2d3f8072dbe4a80a3a65217677c9d9a84f67dab2ab"
+    },
+    {
+      "family": "Arial",
+      "bold": false,
+      "dx_source_px": 0,
+      "dy_slope": -0.087413,
+      "dy_intercept": 0.430767,
+      "size_range_px": [
+        8,
+        32
+      ],
+      "initial_residual_max_px": 0.1023,
+      "font_sha256": "b3658eadae55e682b5f69eb64c439c1ecc8f196c0bb8d4756d145d13bc86476a"
+    },
+    {
+      "family": "Arial",
+      "bold": true,
+      "dx_source_px": 0,
+      "dy_slope": -0.087413,
+      "dy_intercept": 0.430767,
+      "size_range_px": [
+        8,
+        32
+      ],
+      "initial_residual_max_px": 0.1023,
+      "font_sha256": "e8f4e3baf6cc35fed6fcce3a540e8b39e8f6cda1d22a28f2ec8f526fef7a43f5"
+    }
+  ],
+  "profile_id": "artifact-tool-windows-cjk-origin-20261016-v3",
+  "artifact_tool_version": "2.8.94",
+  "calibration_method": "Measure ink bbox from actual final PPTX reimport against PIL-generated source. Apply vertical source-pixel origin correction only.",
+  "validated_samples": 92,
+  "validation": {
+    "sizes_px": [
+      8,
+      12,
+      14,
+      16,
+      24,
+      32,
+      48,
+      64
+    ],
+    "regular_sizes_report": "04/measurements.json",
+    "small_sizes_report": "05/measurements.json",
+    "mean_absolute_y_source_px": 0.6229,
+    "max_absolute_y_source_px": 2.1153,
+    "small_size_mean_absolute_y_source_px": 0.7488,
+    "small_size_max_absolute_y_source_px": 2.1153,
+    "large_sizes_only_for": "微软雅黑 regular/bold",
+    "additional_small_branch": "rejected; only marginal mean improvement, no maximum improvement"
+  },
+  "font_identification_verified": false,
+  "powerpoint_checked": false,
+  "wps_checked": false,
+  "human_acceptance": false
+}

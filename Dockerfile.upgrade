@@ -1,0 +1,8 @@
+ARG PREVIOUS_IMAGE=image2ppt-vision:0.1.0
+FROM ${PREVIOUS_IMAGE}
+COPY src /app/src
+COPY tests /app/tests
+COPY tools /app/tools
+COPY pyproject.toml README.md openapi.json /app/
+RUN pip wheel --no-deps --no-build-isolation --wheel-dir /app/dist /app && pip install --no-deps --force-reinstall /app/dist/image2ppt_vision-0.2.1-py3-none-any.whl
+RUN python -m pytest /app/tests -q

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==75.6.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image2ppt-vision"
+version = "0.2.1"
+requires-python = ">=3.12"
+description = "Independent page vision and source-bound reconstruction with explicit optional model planning"
+dependencies = ["fastapi==0.115.6", "uvicorn==0.34.0", "pydantic==2.10.4", "python-multipart==0.0.20", "Pillow==11.1.0", "numpy==1.26.4", "opencv-python-headless==4.10.0.84", "rapidocr==3.10.0", "onnxruntime==1.20.1"]
+
+[project.scripts]
+image2ppt-vision = "image2ppt_vision.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+image2ppt_vision = ["renderer-origin-profile.json"]

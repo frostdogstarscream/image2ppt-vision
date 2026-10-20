@@ -1,0 +1,30 @@
+{
+  "format_version": "1",
+  "sam_commit": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+  "ocr": "PP-OCRv4 Chinese",
+  "files": {
+    "det.onnx": {
+      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+      "bytes": 4745517,
+      "source": "https://files.pythonhosted.org/packages/ba/12/1e5497183bdbe782dbb91bad1d0d2297dba4d2831b2652657f7517bfc6df/rapidocr_onnxruntime-1.4.4-py3-none-any.whl",
+      "archive_member": "rapidocr_onnxruntime/models/ch_PP-OCRv4_det_infer.onnx"
+    },
+    "rec.onnx": {
+      "sha256": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+      "bytes": 10857958,
+      "source": "https://files.pythonhosted.org/packages/ba/12/1e5497183bdbe782dbb91bad1d0d2297dba4d2831b2652657f7517bfc6df/rapidocr_onnxruntime-1.4.4-py3-none-any.whl",
+      "archive_member": "rapidocr_onnxruntime/models/ch_PP-OCRv4_rec_infer.onnx"
+    },
+    "cls.onnx": {
+      "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+      "bytes": 585532,
+      "source": "https://files.pythonhosted.org/packages/ba/12/1e5497183bdbe782dbb91bad1d0d2297dba4d2831b2652657f7517bfc6df/rapidocr_onnxruntime-1.4.4-py3-none-any.whl",
+      "archive_member": "rapidocr_onnxruntime/models/ch_ppocr_mobile_v2.0_cls_infer.onnx"
+    },
+    "sam2.1_hiera_small.pt": {
+      "sha256": "6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38",
+      "bytes": 184416285,
+      "source": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt"
+    }
+  }
+}

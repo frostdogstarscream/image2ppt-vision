@@ -1,0 +1,39 @@
+services:
+  api:
+    image: image2ppt-vision:0.2.1
+    restart: unless-stopped
+    init: true
+    cpus: 8
+    mem_limit: 16g
+    networks: [isolated]
+    env_file: runtime.env
+    environment:
+      VISION_FONT_MANIFEST: /fonts/manifest.json
+    volumes:
+      - /data/image2ppt-vision/data:/data
+      - /data/image2ppt-vision/models-ready:/models:ro
+      - /data/image2ppt-vision/fonts-v0.2.0:/fonts:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["GPU-452202ca-1679-e799-d19d-e8cca8bcfb12"]
+              capabilities: [gpu]
+  ingress:
+    image: image2ppt-vision:0.2.1
+    restart: unless-stopped
+    init: true
+    cpus: 0.25
+    mem_limit: 128m
+    command: ["python", "/relay.py"]
+    volumes:
+      - ./tools/port_relay.py:/relay.py:ro
+    ports:
+      - "127.0.0.1:18761:18761"
+    networks: [isolated, ingress]
+    depends_on: [api]
+networks:
+  isolated:
+    internal: true
+  ingress: {}
