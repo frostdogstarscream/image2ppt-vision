@@ -1,6 +1,6 @@
 services:
   api:
-    image: image2ppt-vision:0.2.1
+    image: image2ppt-vision:0.3.0
     restart: unless-stopped
     init: true
     cpus: 8
@@ -21,7 +21,7 @@ services:
               device_ids: ["GPU-452202ca-1679-e799-d19d-e8cca8bcfb12"]
               capabilities: [gpu]
   ingress:
-    image: image2ppt-vision:0.2.1
+    image: image2ppt-vision:0.3.0
     restart: unless-stopped
     init: true
     cpus: 0.25

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "image2ppt-vision",
-    "version": "0.2.1"
+    "version": "0.3.0"
   },
   "paths": {
     "/health": {
@@ -343,7 +343,10 @@
           },
           "version": {
             "type": "string",
-            "const": "1.0",
+            "enum": [
+              "1.0",
+              "1.1"
+            ],
             "title": "Version",
             "default": "1.0"
           },
@@ -397,6 +400,14 @@
             "type": "array",
             "maxItems": 1000,
             "title": "Shapes"
+          },
+          "tables": {
+            "items": {
+              "$ref": "#/components/schemas/TableProposal"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Tables"
           }
         },
         "additionalProperties": false,
@@ -468,7 +479,8 @@
               "segment",
               "extract",
               "compare",
-              "reconstruct"
+              "reconstruct",
+              "reconstruct_elements"
             ],
             "title": "Operation"
           },
@@ -608,6 +620,47 @@
                 "type": "null"
               }
             ]
+          },
+          "element_inventory": {
+            "type": "boolean",
+            "title": "Element Inventory",
+            "default": false
+          },
+          "analysis_job_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Job Id"
+          },
+          "element_plan": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Element Plan"
+          },
+          "renderer_version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 40,
+                "pattern": "^\\d+\\.\\d+\\.\\d+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Renderer Version"
           }
         },
         "additionalProperties": false,
@@ -697,6 +750,125 @@
           "fill"
         ],
         "title": "Shape"
+      },
+      "TableMerge": {
+        "properties": {
+          "row": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Row"
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Column"
+          },
+          "row_span": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Row Span",
+            "default": 1
+          },
+          "column_span": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Column Span",
+            "default": 1
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "row",
+          "column"
+        ],
+        "title": "TableMerge"
+      },
+      "TableProposal": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,40}$",
+            "title": "Id"
+          },
+          "region_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "title": "Region Id"
+          },
+          "bbox": {
+            "items": {
+              "type": "number",
+              "minimum": 0.0
+            },
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Bbox"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Rows"
+          },
+          "column_widths": {
+            "items": {
+              "type": "number",
+              "minimum": 0.0
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Column Widths"
+          },
+          "row_heights": {
+            "items": {
+              "type": "number",
+              "minimum": 0.0
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Row Heights"
+          },
+          "ocr_ids": {
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "title": "Ocr Ids"
+          },
+          "merges": {
+            "items": {
+              "$ref": "#/components/schemas/TableMerge"
+            },
+            "type": "array",
+            "maxItems": 2000,
+            "title": "Merges"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "region_id",
+          "bbox",
+          "rows",
+          "column_widths",
+          "row_heights",
+          "ocr_ids"
+        ],
+        "title": "TableProposal"
       },
       "TextOverride": {
         "properties": {

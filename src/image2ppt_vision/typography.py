@@ -341,7 +341,7 @@ def _hex(color):
     return "#" + "".join(f"{int(v):02X}" for v in np.clip(np.rint(color), 0, 255))
 
 
-def estimate_text(rgb, ocr, font_candidates=None):
+def estimate_text(rgb, ocr, font_candidates=None, *, isolate_ocr_window=False):
     """Estimate one horizontal OCR line and safely remove its source ink.
 
     Input: uint8 RGB image; OCR dictionary with ``text`` and ``bbox`` (xywh).
@@ -393,6 +393,15 @@ def estimate_text(rgb, ocr, font_candidates=None):
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
     for i in range(1, count):
         sx, sy, sw, sh, area = stats[i]
+        if isolate_ocr_window:
+            # A neighboring label/decoration may enter the padded search area.
+            # Discard only components outside the detector window. Components
+            # crossing it remain evidence and can still force a refusal.
+            overlap = max(0,min(sx+sw,x+w-x0)-max(sx,x-x0))*max(0,min(sy+sh,y+h-y0)-max(sy,y-y0))
+            if overlap == 0:
+                protected_foreground[labels == i] = True
+                mask[labels == i] = False
+                continue
         if area < 2:
             mask[labels == i] = False
         elif ((sy == 0 and sy+sh < y-y0+2) or
@@ -420,6 +429,7 @@ def estimate_text(rgb, ocr, font_candidates=None):
     colors = _component_colors(crop, delta, mask)
     if not colors:
         return refuse("foreground_color_uncertain")
+    diag["foreground_color_count"] = len(colors)
     color = colors[0]["color"]
     result["color"] = _hex(color)
     # Normalize each pixel by local contrast, so a red word and a black word

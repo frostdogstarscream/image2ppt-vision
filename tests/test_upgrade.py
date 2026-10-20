@@ -14,7 +14,7 @@ SPEC = importlib.util.spec_from_file_location('vision_upgrade_tests_target', MOD
 upgrade = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(upgrade)
 OLD_IMAGE = 'image2ppt-vision:0.1.0'
-NEW_IMAGE = 'image2ppt-vision:0.2.1'
+NEW_IMAGE = 'image2ppt-vision:0.3.0'
 OLD_ID = 'sha256:' + '1' * 64
 NEW_ID = 'sha256:' + '2' * 64
 TOKEN = 'private-fixture-token-do-not-print'
@@ -59,7 +59,7 @@ class FakeDocker:
     def version(self):
         current = next(x for x in self.state.values()
                        if x['project'] == upgrade.PROJECT and x['service'] == 'api')
-        return '0.2.1' if current['image_id'] == NEW_ID else '0.1.0'
+        return '0.3.0' if current['image_id'] == NEW_ID else '0.1.0'
 
     def command(self, arguments, *, label, env=None, timeout=120):
         arguments = list(arguments)
@@ -75,8 +75,8 @@ class FakeDocker:
         if arguments[:2] == ['docker', 'exec']:
             assert arguments[3:] == ['python', '-c', upgrade.VERSION_CODE]
             item = self.state[arguments[2]]
-            version = '0.2.1' if item['image_id'] == NEW_ID else '0.1.0'
-            if self.wrong_live_version and version == '0.2.1':
+            version = '0.3.0' if item['image_id'] == NEW_ID else '0.1.0'
+            if self.wrong_live_version and version == '0.3.0':
                 version = '0.1.9'
             return version + '\n'
         if arguments[:2] == ['docker', 'run']:
@@ -89,7 +89,7 @@ class FakeDocker:
                 if self.fail_tests:
                     raise upgrade.UpgradeError('candidate-offline-tests: command exited 1')
                 return 'synthetic candidate tests passed\n'
-            return '0.2.1\n'
+            return '0.3.0\n'
         assert arguments[:2] == ['docker', 'compose'], arguments
         assert arguments[arguments.index('--project-name')+1] == upgrade.PROJECT
         files = [Path(arguments[i+1]) for i, a in enumerate(arguments) if a == '--file']
@@ -174,7 +174,7 @@ def assert_no_other_mutation_commands(case):
 
 def test_upgrade_preflights_offline_and_preserves_all_nine_other_states(case, capsys):
     result = execute(case)
-    assert result['status'] == 'PASS' and result['observed_version'] == '0.2.1'
+    assert result['status'] == 'PASS' and result['observed_version'] == '0.3.0'
     assert result['previous_version'] == '0.1.0'
     assert result['non_target_unchanged'] and result['non_target_containers'] == 9
     assert upgrade.other_states(case.fake.state) == upgrade.other_states(case.fake.initial)
@@ -351,10 +351,10 @@ def test_cli_is_explicit_and_defaults_to_version_021(monkeypatch, capsys):
     calls = []
     def fake_upgrade(*args, **kwargs):
         calls.append((args, kwargs))
-        return {'status': 'PASS', 'observed_version': '0.2.1',
+        return {'status': 'PASS', 'observed_version': '0.3.0',
                 'non_target_unchanged': True, 'evidence': '/private/evidence'}
     monkeypatch.setattr(upgrade, 'upgrade', fake_upgrade)
     assert upgrade.main(['--release', '/data/image2ppt-vision/releases/new',
         '--previous-release', '/data/image2ppt-vision/releases/old', '--image', NEW_IMAGE]) == 0
-    assert calls[0][1]['expected_version'] == '0.2.1'
+    assert calls[0][1]['expected_version'] == '0.3.0'
     assert json.loads(capsys.readouterr().out)['non_target_unchanged'] is True

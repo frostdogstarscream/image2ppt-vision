@@ -23,6 +23,9 @@ def verified_models():
 def capabilities():
     result = {"version": __version__, "geometry": True, "ocr": False, "segmentation": False,
               "reconstruction": True, "reconstruction_requires_plan": True, "pptx_compilation": False,
+              "element_reconstruction": {"operation":"reconstruct_elements",
+                  "requires":"successful analyze with element_inventory; source-bound ElementPlan/1 or /2",
+                  "source_typography_calibration":True,"quality_status":"REVIEW_REQUIRED"},
               "network_inference": False, "models": None,
               "model_plan_provider": {"available": True, "automatic": False, "invocation": "explicit_cli_plan",
                   "configured": all(bool(os.environ.get(k)) for k in ("VISION_LLM_BASE_URL","VISION_LLM_MODEL","VISION_LLM_API_KEY"))}}

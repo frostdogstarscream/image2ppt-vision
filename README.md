@@ -1,8 +1,14 @@
-# image2ppt-vision 0.2.1
+# image2ppt-vision 0.3.0
 
 独立的页面视觉分析与重建服务。输入图片，输出文字、几何候选、关系、分割掩码、素材及诊断证据。0.2.0 引入由源图哈希绑定的声明式重建计划驱动的 `reconstruct`，输出 SlideIR、局部素材、authoring 和重建报告。0.2.1 修复原生文字删除后可能留下的抗锯齿残影，以及模块低对比背景像素遮挡原生底形状改色的问题；具体范围见下文。PPTX 仍交给宿主机已有的固定 Node/Artifact 编译器；Python HTTP 服务不编译 PPTX。
 
 分析和重建不自动调用外部大模型。可由当前 Codex 会话编写计划，或明确调用可选的 `plan` 命令生成待复核计划。
+
+严格的一页一次、最多两轮独立 API 实验使用新增 `evaluate-api`，参考 PPT 由独立 `score-api` 评测；配置、冻结/续跑规则、1.1 原生表格提案及完成边界见 [独立 API 重建与结构评测](INDEPENDENT_API.md)。这一路径保留原始响应、禁止重试，不复用旧的人工修订计划。
+
+0.3.0 将元素清单、`ElementPlan/1`、`ElementPlan/2` 的确定性重建和源图文字测量接入正式 HTTP 入口，见 [服务器元素重建接口与升级说明](SERVER_ELEMENTS.md)。原有 `reconstruct` 保持原契约。新入口复用服务内已封存的分析，不重新生成 OCR ID；保留提交方案、生成方案和校准结果。新增文字可见性诊断、字形边界定位及严格字体拟合检查。
+
+[元素拆解与监督复检实验](SUPERVISED_ELEMENTS.md) 中的多次模型调用、字体规划、ModulePlan 和独立监督模型仍属于实验编排，尚未成为服务器自动调用流程，不能与单请求基线混合排名。HTTP 服务仍不调用外部模型，也不直接编译 PPTX。
 
 ## 重建和可选模型计划
 
@@ -111,9 +117,9 @@ python -m pytest tests -q
 
 `requirements-linux.lock` 约束 Linux x86_64 / Python 3.12 的直接和传递依赖；`environment.lock` 是实际安装快照，其中 `/app` 和 `/wheelhouse` 是镜像内路径，不可直接在 Windows 执行。`wheelhouse-manifest.json` 记录离线安装文件哈希，`models-manifest.json` 记录实际模型哈希及固定 SAM 源码提交。`openapi.json` 是导出的接口文档。
 
-将交付的离线依赖目录放到源码目录下的 `wheelhouse/`，使用 `python tools/verify_wheelhouse.py --directory wheelhouse --manifest wheelhouse-manifest.json` 校验。先准备 `python:3.12.11-slim-bookworm` 基础镜像，再执行 `docker build --network=none -t image2ppt-vision:0.2.1 .`。构建过程无外网，缺文件或版本不匹配会失败，不会在线补包。源码 ZIP 不内嵌 CUDA 依赖、模型权重和私有验收图片；这些目录必须单独交付或按清单准备。
+将交付的离线依赖目录放到源码目录下的 `wheelhouse/`，使用 `python tools/verify_wheelhouse.py --directory wheelhouse --manifest wheelhouse-manifest.json` 校验。先准备 `python:3.12.11-slim-bookworm` 基础镜像，再执行 `docker build --network=none -t image2ppt-vision:0.3.0 .`。构建过程无外网，缺文件或版本不匹配会失败，不会在线补包。源码 ZIP 不内嵌 CUDA 依赖、模型权重和私有验收图片；这些目录必须单独交付或按清单准备。
 
-首次部署时，服务器目录准备好后执行 `python3 tools/deploy.py --release /data/image2ppt-vision/releases/v0.2.1`。脚本先跑容器测试，再执行已授权的九容器切换、GPU 模型烟雾测试和健康检查，保存 `evidence/deploy-*/` 下的记录；失败恢复原业务。脚本有生产停机副作用，只能在已获授权的目标主机执行。已有视觉服务按下文使用 `tools/upgrade.py`。
+首次部署时，服务器目录准备好后执行 `python3 tools/deploy.py --release /data/image2ppt-vision/releases/v0.3.0`。脚本先跑容器测试，再执行已授权的九容器切换、GPU 模型烟雾测试和健康检查，保存 `evidence/deploy-*/` 下的记录；失败恢复原业务。脚本有生产停机副作用，只能在已获授权的目标主机执行。已有视觉服务按下文使用 `tools/upgrade.py`。
 
 Docker 25 的 internal 网络不发布宿主机端口，因此 Compose 使用两个独立容器：`api` 仅加入 internal 网络，`ingress` 仅转发 TCP 到 api，绑定宿主机 127.0.0.1:18761。ingress 无模型目录、数据目录、令牌或 GPU 权限，额外限制为 0.25 CPU / 128 MiB。它不改变接口鉴权。SSH 服务若禁用端口转发，需管理员允许目标端口；部署脚本不修改 SSH 策略。
 
@@ -128,7 +134,7 @@ Docker 25 的 internal 网络不发布宿主机端口，因此 Compose 使用两
 
 包内字体原点校准针对 Artifact Tool 2.8.94、1672×941 到 1280×720 画布，以及记录的字体文件哈希。仅在这些条件和验证过的字号范围匹配时修正 y 原点；不同字体/画布/版本会标记未校准。92 个合成文字样本的实际 PPTX 回渲染校准不等于真实页面或 PowerPoint/WPS 的验收。
 
-已有 0.1.0 或 0.2.0 服务使用 `tools/upgrade.py`。先把新源码保存到独立的 `v0.2.1` 目录，按 `Dockerfile.upgrade` 离线构建新镜像 `image2ppt-vision:0.2.1`；该 Dockerfile 默认基于保留的 0.1.0 依赖镜像，安装 0.2.1 wheel。保留旧目录和旧镜像标签，已有 `image2ppt-vision:0.2.0` 标签不可用新构建覆盖。以下以当前运行版本为 0.2.0 为例：
+已有服务使用 `tools/upgrade.py`。当前 0.3.0 的升级命令与验证边界见 [SERVER_ELEMENTS.md](SERVER_ELEMENTS.md)。以下说明保留 0.2.1 的历史部署示例；旧目录和旧镜像标签不得用新构建覆盖。
 
 ```text
 python3 tools/upgrade.py --release /data/image2ppt-vision/releases/v0.2.1 --previous-release /data/image2ppt-vision/releases/v0.2.0 --image image2ppt-vision:0.2.1 --font-manifest /fonts/manifest.json
@@ -141,3 +147,9 @@ python3 tools/upgrade.py --release /data/image2ppt-vision/releases/v0.2.1 --prev
 0.2.1 在文字形状拟合与平滑背景验证通过后，清理完整的已验证字形邻域，包括核心笔画周围的低透明度抗锯齿像素，并保护相邻文字所属像素。模块背景的 12/255 残差阈值仅用于浅色 `panel`：拟合底色的 RGB 各通道均不低于 225，且变化不超过 28。对符合条件的面板，与拟合背景的最大 RGB 通道差值不超过 12/255 的低对比像素归入可改色的原生底形状，避免这些像素以不透明图片遮挡后续改色；差值超过阈值的内容保留为局部栅格。彩色或较强渐变模块，以及 `header`/`footer` 区域继续使用原有的 3/255 残差阈值，防止深色渐变背景出现分块。照片和 `diagram` 区域不执行此模块背景归一化流程。
 
 这项清理会对阈值内的背景差异进行归一化，不保证源图与输出无视觉差异。应结合最终 PPTX 回渲染和直接删除文字、修改底形状颜色的编辑探针复核；算法测试或探针通过均不等于 PowerPoint/WPS 或人工验收通过，报告继续保留 `REVIEW_REQUIRED` 与对应未验收状态。
+# 混合图层重建
+
+OCR 的可选 API 校准入口与证据输出见 [OCR_CALIBRATION.md](OCR_CALIBRATION.md)。它显式调用视觉模型读取原图文字裁剪，不需要本地部署视觉语言模型。
+
+新增显式 `decompose`、`reconstruct --layers` 和 `convert --layers-dir`，使用独立 LayerManifest 1.0。操作步骤、清单契约、Ming 配置及审核边界见 [HYBRID.md](HYBRID.md)。无图层输入的原有调用保持兼容；当前真实拆层效果尚待有权限的 MaaS 账号验证。
+

@@ -150,7 +150,7 @@ def _compiled_artifacts(result, build_dir, page_count):
             "preview_origin": "reimported_final_pptx"}
 
 
-def convert(input_dir, analysis_dir, plan_dir, compiler_root, output, *, compile_timeout=1800):
+def convert(input_dir, analysis_dir, plan_dir, compiler_root, output, *, compile_timeout=1800, layers_dir=None):
     """Reconstruct sorted PNG pages, then compose with the fixed local compiler.
 
     The output directory must be new. conversion.json records partial progress
@@ -169,6 +169,11 @@ def convert(input_dir, analysis_dir, plan_dir, compiler_root, output, *, compile
     write_json(manifest_path, manifest)
     try:
         inputs = _collect(input_dir, analysis_dir, plan_dir)
+        layers_by_stem={}
+        if layers_dir is not None:
+            layers_by_stem={p.stem:p for p in _files(_directory(layers_dir,'layers_directory_missing'),'.json')}
+            if set(layers_by_stem)!={s.stem for s,_,_ in inputs}:
+                raise ConversionError('layer_stems_mismatch')
         compiler, node = _compiler(compiler_root)
         manifest["source_order"] = [source.name for source, _, _ in inputs]
         input_root = output / "inputs"
@@ -191,7 +196,15 @@ def convert(input_dir, analysis_dir, plan_dir, compiler_root, output, *, compile
                     raise ConversionError("input_changed_during_snapshot")
             page_output = output / "pages" / source.stem
             plan = load_plan(plan_copy, source_sha256=row["source_sha256"])
-            report = reconstruct(source_copy, read_json(analysis_copy), plan, page_output)
+            options={}
+            if layers_dir is not None:
+                from .layers import snapshot_layers
+                evidence=read_json(analysis_copy)
+                saved=snapshot_layers(layers_by_stem[source.stem],input_root/'layers'/source.stem,
+                        source_sha256=row['source_sha256'],image_size=evidence['image_size'],
+                        texts=[t for t in evidence['objects'] if t['kind']=='text'])
+                row['layers_sha256']=digest(saved);options['layers']=saved
+            report = reconstruct(source_copy, read_json(analysis_copy), plan, page_output,**options)
             ir = page_output / "slideir.json"
             if not ir.is_file() or not (page_output / "authoring.json").is_file():
                 raise ConversionError("reconstruction_artifacts_missing")

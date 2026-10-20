@@ -30,7 +30,7 @@ def main():
     before=inventory();(evidence/'containers-before.json').write_text(json.dumps(before,indent=2))
     # Validate CPU package and engineering tests before interrupting existing services.
     with (evidence/'tests.log').open('w') as f:
-        call('docker','run','--rm','--network=none','--cpus=8','--memory=16g','image2ppt-vision:0.2.1','python','-m','pytest','tests','-q',output=f)
+        call('docker','run','--rm','--network=none','--cpus=8','--memory=16g','image2ppt-vision:0.3.0','python','-m','pytest','tests','-q',output=f)
     script=str(release/'tools/gpu_services.py');record=str(evidence/'gpu-services.json')
     call('python3',script,'snapshot','--record',record)
     compose=['docker','compose','--project-name',PROJECT,'--file',str(release/'compose.yaml')]
@@ -40,7 +40,7 @@ def main():
         if any(inventory()[name]['running'] for name in NAMES):raise RuntimeError('external restart detected')
         with (evidence/'gpu-smoke.json').open('w') as f:
             call('docker','run','--rm','--network=none','--gpus','device='+GPU,'--cpus=8','--memory=16g',
-                 '-v',str(ROOT/'models-ready')+':/models:ro','image2ppt-vision:0.2.1','python','tools/gpu_smoke.py',output=f)
+                 '-v',str(ROOT/'models-ready')+':/models:ro','image2ppt-vision:0.3.0','python','tools/gpu_smoke.py',output=f)
         env=release/'runtime.env'
         if not env.exists():
             token=secrets.token_urlsafe(48)

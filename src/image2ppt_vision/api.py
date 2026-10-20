@@ -53,6 +53,9 @@ def create_app(root=None, token=None, run_worker=True):
             if r.operation == "reconstruct":
                 asset = read_json(store.path("assets",r.asset_id)/"asset.json")
                 validate_plan(r.plan,source_sha256=asset["original_sha256"],image_size=asset["size"])
+            if r.operation == "reconstruct_elements":
+                from .element_service import prepare
+                prepare(store,r)
             return store.submit(r)
         except FileNotFoundError:raise HTTPException(404,"asset not found")
         except ValueError as e:raise HTTPException(429 if str(e)=="queue full" else 422,str(e))

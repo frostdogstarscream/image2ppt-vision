@@ -6,7 +6,7 @@ from .plans import ReconstructionPlan
 
 class Request(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    operation: Literal["analyze", "segment", "extract", "compare", "reconstruct"]
+    operation: Literal["analyze", "segment", "extract", "compare", "reconstruct", "reconstruct_elements"]
     asset_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     reference_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     mask_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
@@ -21,9 +21,24 @@ class Request(BaseModel):
     register_translation: bool = False
     timeout_seconds: int = Field(default=300, ge=1, le=1800)
     plan: ReconstructionPlan | None = None
+    element_inventory: bool = False
+    analysis_job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    element_plan: dict | None = None
+    renderer_version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$", max_length=40)
 
     @model_validator(mode="after")
     def consistent(self):
+        if self.element_inventory and (self.operation != "analyze" or not self.ocr):
+            raise ValueError("element_inventory requires analyze with OCR")
+        if self.operation == "reconstruct_elements":
+            if not self.analysis_job_id or self.element_plan is None:
+                raise ValueError("reconstruct_elements requires analysis_job_id and element_plan")
+            if self.segment or self.bbox or self.points or self.labels or self.mode != "automatic":
+                raise ValueError("element reconstruction does not accept segmentation or crop prompts")
+            from .element_service import validate_payload
+            validate_payload(self.element_plan)
+        elif self.analysis_job_id or self.element_plan is not None or self.renderer_version is not None:
+            raise ValueError("element reconstruction options only valid for reconstruct_elements")
         if self.operation == "reconstruct":
             if self.plan is None:
                 raise ValueError("reconstruct requires a validated plan")

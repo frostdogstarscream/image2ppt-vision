@@ -158,7 +158,16 @@ def _verified_shape(pixels, proposal):
     return (node,[x0,y0,x1,y1],background,{'mean_fill_error':float(error.mean()),'p95_fill_error':float(np.percentile(error,95))}),'verified_from_pixels'
 
 
-def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_width=1280):
+def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_width=1280, layers=None):
+    proposed=plan.to_dict() if hasattr(plan,'to_dict') else plan
+    if proposed.get('tables'):
+        if layers is not None:raise ValueError('table planning and reviewed layers are separate reconstruction modes')
+        from .table_reconstruction import reconstruct_tables
+        return reconstruct_tables(source,analysis,plan,output,font_candidates=font_candidates,target_width=target_width)
+    if layers is not None:
+        from .layer_reconstruction import reconstruct_layers
+        return reconstruct_layers(source, analysis, plan, output, layers,
+                                  font_candidates=font_candidates, target_width=target_width)
     source=Path(source).resolve(); output=Path(output).resolve()
     if output.exists(): raise FileExistsError('reconstruction output must be a new directory')
     analysis=read_json(analysis) if isinstance(analysis,(str,Path)) else analysis
@@ -200,9 +209,10 @@ def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_
     clean=pixels.copy(); text_nodes=[]; retained=[]; diagnostics=[]
     regions=plan['regions']; owners={r['id']:[] for r in regions}; owners['page-remainder']=[]
     def region_for(t):
-        x,y,bw,bh=t['bbox']; cx,cy=x+bw/2,y+bh/2
-        return next((r['id'] for r in regions if r['bbox'][0]<=cx<r['bbox'][0]+r['bbox'][2]
-                     and r['bbox'][1]<=cy<r['bbox'][1]+r['bbox'][3]),'page-remainder')
+        x,y,bw,bh=t['bbox']
+        return next((r['id'] for r in regions if r['bbox'][0]<=x and r['bbox'][1]<=y
+                     and x+bw<=r['bbox'][0]+r['bbox'][2]
+                     and y+bh<=r['bbox'][1]+r['bbox'][3]),'page-remainder')
     for text in texts:
         owner=region_for(text); original_text=text['text']
         if text['id'] in overrides: text['text']=overrides[text['id']]['text']
@@ -222,6 +232,20 @@ def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_
             patch=estimate['cleaned_patch']
             changed=np.any(patch!=pixels[y0:y1,x0:x1],axis=2)
             overlap=False
+            # Repair may use surrounding context but cannot erase remote borders.
+            tx,ty,tw,th=text['bbox']
+            allowed=np.zeros(changed.shape,bool)
+            ax=max(x0,math.floor(tx)-2);ay=max(y0,math.floor(ty)-2)
+            bx=min(x1,math.ceil(tx+tw)+2);by=min(y1,math.ceil(ty+th)+2)
+            if bx>ax and by>ay: allowed[ay-y0:by-y0,ax-x0:bx-x0]=True
+            # Ignore the existing <=12-channel background normalization tolerance;
+            # only structural changes outside the text envelope block lifting.
+            structural_change=np.max(abs(patch.astype(float)-pixels[y0:y1,x0:x1].astype(float)),axis=2)>12
+            unsafe_cleanup=int((structural_change & ~allowed).sum())>3
+            # A cleanup reaching outside its module must remain page-owned.
+            if region_for({'bbox': estimate['patch_bbox']}) != owner:
+                owner='page-remainder'
+                diagnostic['region']=owner
             for other in texts:
                 if other['id']==text['id']: continue
                 ox,oy,ow,oh=other['bbox']
@@ -233,6 +257,7 @@ def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_
                 if bx>ax and by>ay and changed[ay-y0:by-y0,ax-x0:bx-x0].sum()>3:
                     overlap=True;break
             if overlap: diagnostic['reason']='adjacent_text_overlap'
+            elif unsafe_cleanup: diagnostic['reason']='cleanup_outside_text_bounds'
             else:
                 clean[y0:y1,x0:x1][changed]=patch[changed]
                 x,y,bw,bh=estimate['bbox']; size=estimate['font_size_px']
@@ -269,7 +294,22 @@ def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_
             evidence.append({'id':node['evidence_ids'][0],'kind':'shape','bbox':node['bbox']})
             shape_diagnostics.append({'id':proposal['id'],'native':True,'reason':reason,**measurement})
         else:shape_diagnostics.append({'id':proposal['id'],'native':False,'reason':reason})
-    def add_asset(identifier,array,bbox,owned):
+    # Retained cross-boundary text stays a single page-level pixel object.
+    # Punch its rectangle out of every lower image so it is never split/duplicated.
+    crossing=[];excluded=np.zeros((h,w),bool)
+    for tid in owners['page-remainder']:
+        t=next(t for t in texts if t['id']==tid)
+        a,b,c,d=_bounds(t['bbox'],w,h)
+        if any(max(a,r['bbox'][0])<min(c,r['bbox'][0]+r['bbox'][2]) and
+               max(b,r['bbox'][1])<min(d,r['bbox'][1]+r['bbox'][3]) for r in regions):
+            crossing.append(t);excluded[b:d,a:c]=True
+    owners['page-remainder']=[tid for tid in owners['page-remainder'] if tid not in {t['id'] for t in crossing}]
+    def add_asset(identifier,array,bbox,owned,exclude=True):
+        if exclude:
+            a,b,c,d=_bounds(bbox,w,h);mask=excluded[b:d,a:c]
+            if mask.any():
+                array=array.copy() if array.shape[2]==4 else np.dstack([array,np.full(array.shape[:2],255,np.uint8)])
+                array[:,:,3][mask]=0
         path=output/'assets'/f'{identifier}.png';Image.fromarray(array).save(path)
         eid=identifier+'-pixels'
         evidence.append({'id':eid,'kind':'image','bbox':bbox})
@@ -283,12 +323,10 @@ def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_
     for r in regions:
         x0,y0,x1,y1=_bounds(r['bbox'],w,h); remainder[y0:y1,x0:x1]=255
     add_asset('page-decoration',remainder,[0,0,w,h],owners['page-remainder'])
-    for owner,node in text_nodes:
-        if owner=='page-remainder': node['z']=len(nodes);nodes.append(node)
     for region in regions:
         rid=region['id']; x0,y0,x1,y1=_bounds(region['bbox'],w,h)
         patch=clean[y0:y1,x0:x1]; bbox=[x0,y0,x1-x0,y1-y0]; members=[]
-        fit=None if region['kind'] in ('photo','diagram') else _background(patch)
+        fit=None if region['kind'] in ('photo','diagram') or excluded[y0:y1,x0:x1].any() else _background(patch)
         if fit is None:
             members.append(add_asset(rid+'-visual',patch,bbox,owners[rid]));residual_area+=patch.shape[0]*patch.shape[1]
         else:
@@ -324,6 +362,12 @@ def reconstruct(source, analysis, plan, output, *, font_candidates=None, target_
         for owner,node in text_nodes:
             if owner==rid:node['z']=len(nodes);nodes.append(node);members.append(node['id'])
         if len(members)>1:groups.append({'id':rid+'-group','member_ids':members})
+    # Cross-boundary native text belongs above all module backgrounds.
+    for index,t in enumerate(crossing):
+        a,b,c,d=_bounds(t['bbox'],w,h)
+        add_asset(f'crossing-text-{index:03}',pixels[b:d,a:c],[a,b,c-a,d-b],[t['id']],exclude=False)
+    for owner,node in text_nodes:
+        if owner=='page-remainder': node['z']=len(nodes);nodes.append(node)
     ir={'schema_version':'0.1','source_image':'source/page.png','source_sha256':digest(output/'source/page.png'),
         'canvas':{'source_px':[w,h],'target_px':[target_width,round(target_width*h/w)]},
         'background':{'color':'FFFFFF'},'review_status':'needs_review','review_notes':notes,

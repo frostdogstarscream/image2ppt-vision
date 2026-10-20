@@ -244,7 +244,7 @@ def wait_healthy(runner, identifier, expected, label, *, seconds=30):
     raise UpgradeError(f'{label}: health and version did not pass within {seconds} seconds')
 
 
-def upgrade(release, previous_release, image, *, expected_version='0.2.1',
+def upgrade(release, previous_release, image, *, expected_version='0.3.0',
             font_manifest=None, root=None, runner_factory=Runner):
     """Run an explicitly requested upgrade. Root injection is for isolated tests."""
     root = Path(root) if root is not None else ROOT
@@ -378,7 +378,7 @@ def main(argv=None):
     parser.add_argument('--release', required=True)
     parser.add_argument('--previous-release', required=True)
     parser.add_argument('--image', required=True)
-    parser.add_argument('--expected-version', default='0.2.1')
+    parser.add_argument('--expected-version', default='0.3.0')
     parser.add_argument('--font-manifest', help='Explicit container path, for example /fonts/manifest.json')
     arguments = parser.parse_args(argv)
     try:

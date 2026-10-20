@@ -77,7 +77,7 @@ def test_saved_cli_and_http_generate_identical_slideir(case,capsys):
         report=read_json(case.store.path('jobs',job['id'])/'result.json')
         assert report['reconstruction']['status']=='REVIEW_REQUIRED'
         assert report['reconstruction']['human_acceptance'] is False
-        assert report['environment']['code_version']=='0.2.1'
+        assert report['environment']['code_version']=='0.3.0'
     case.forbidden.assert_not_called()
 
 
@@ -178,7 +178,7 @@ def test_capabilities_report_configuration_without_secret(case,monkeypatch):
     monkeypatch.setenv('VISION_LLM_API_KEY','private-api-key')
     monkeypatch.setenv('VISION_MODELS',str(case.root/'missing-models'))
     result=models.capabilities();encoded=json.dumps(result)
-    assert result['version']==__version__=='0.2.1'
+    assert result['version']==__version__=='0.3.0'
     assert result['reconstruction'] is True and result['pptx_compilation'] is False
     assert result['network_inference'] is False
     assert result['model_plan_provider']=={'available':True,'automatic':False,'configured':True,'invocation':'explicit_cli_plan'}

@@ -50,7 +50,7 @@ def _font_hash(path):
         return None
 
 
-def origin_correction(estimate, source_size, target_size):
+def origin_correction(estimate, source_size, target_size, *, renderer_version=None):
     """Return a verified vertical adjustment in source-image pixels.
 
     ``VISION_ARTIFACT_VERSION`` may explicitly declare a renderer version. When
@@ -73,7 +73,7 @@ def origin_correction(estimate, source_size, target_size):
         result["reason"] = "uncalibrated_" + reason
         return result
 
-    version = os.environ.get("VISION_ARTIFACT_VERSION", FIXED_ARTIFACT_VERSION)
+    version = renderer_version if renderer_version is not None else os.environ.get("VISION_ARTIFACT_VERSION", FIXED_ARTIFACT_VERSION)
     if version != expected_version:
         return uncalibrated("renderer_version")
     if (not isinstance(source_size, (list, tuple)) or not isinstance(target_size, (list, tuple)) or

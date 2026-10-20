@@ -52,6 +52,22 @@ def execute(root,id):
         if r.ocr: result["objects"].extend(stage("ocr",lambda:models.recognize(image)) or [])
         result["relations"]=stage("relations",lambda:algorithms.relations(result["objects"]))
         stage("overlay",lambda:algorithms.overlay(image,result["objects"],out/"overlay.png"))
+        if r.element_inventory:
+            def inventory():
+                from .element_inventory import build_inventory
+                if result["inputs"][r.asset_id].get("exif_orientation",1)!=1:
+                    raise ValueError("element inventory requires orientation-normalized input")
+                if not any(s["name"]=="ocr" and s["status"]=="PASS" for s in result["stages"]):
+                    raise ValueError("successful OCR required")
+                bundle=build_inventory(store.path("assets",r.asset_id)/"original",result,out/"elements")
+                return {"path":"elements/inventory.json","source_sha256":bundle["source_sha256"],
+                        "candidate_count":bundle["candidate_count"],"text_count":len(bundle["texts"])}
+            result["element_inventory"]=stage("element_inventory",inventory)
+    if r.operation == "reconstruct_elements":
+        def do_elements():
+            from .element_service import reconstruct
+            return reconstruct(store,r,out/"reconstruction")
+        result["reconstruction"]=stage("reconstruct_elements",do_elements)
     if r.operation == "reconstruct":
         def do_reconstruct():
             from .reconstruction import reconstruct
@@ -111,6 +127,6 @@ def execute(root,id):
     store.seal(id)
     failed=sum(s["status"]=="FAIL" for s in result["stages"])
     status = "PARTIAL" if failed and failed<len(result["stages"]) else "FAILED" if failed else "SUCCEEDED"
-    if r.operation == "reconstruct" and result.get("reconstruction") is None:
+    if r.operation in {"reconstruct","reconstruct_elements"} and result.get("reconstruction") is None:
         status = "FAILED"
     store.update(id,status,result="result.json")

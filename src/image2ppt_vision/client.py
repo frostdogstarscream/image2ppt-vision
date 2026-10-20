@@ -31,7 +31,7 @@ def upload(base,path):
 
 def run(args):
     if args.command=='doctor':return json.loads(request(args.url,'/v1/capabilities'))
-    if args.command not in {'analyze','segment','extract','compare','reconstruct'}:raise ValueError('remote command not supported')
+    if args.command not in {'analyze','segment','extract','compare','reconstruct','reconstruct_elements'}:raise ValueError('remote command not supported')
     opts=read_json(args.options) if args.options else {}
     output=None
     if args.command == 'reconstruct':
@@ -39,6 +39,11 @@ def run(args):
         output=Path(args.output).resolve()
         if output.exists():raise FileExistsError('output must be a new directory')
         opts['plan']=load_plan(args.plan,source_sha256=digest(args.input)).to_dict()
+    if args.command == 'reconstruct_elements':
+        output=Path(args.output).resolve()
+        if output.exists():raise FileExistsError('output must be a new directory')
+        opts.update(element_plan=read_json(args.plan),analysis_job_id=args.analysis_job_id,
+                    renderer_version=args.renderer_version)
     opts.update(operation=args.command,asset_id=upload(args.url,args.input))
     for field,source in [('reference_id',args.reference),('mask_id',args.mask)]:
         if source:opts[field]=upload(args.url,source)
