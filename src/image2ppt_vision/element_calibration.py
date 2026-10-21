@@ -284,9 +284,9 @@ def _fill_measured(pixels,node,nodes):
     measurement['projection']=projection
     if policy_flags()['fill_projection_guard'] and not two_stop_ok:
         measurement['projection_rejected']=projection
-        # A failed projection is not evidence for the weak flat reading;
-        # only a strong flat survives as an honest fallback.
-        return flat,measurement
+        # Keep the old fallback: a nearly flat bar with a failed gradient
+        # projection is still better represented by its coherent flat reading.
+        return (flat or weak),measurement
     if np.percentile(error,95)>60:
         return (flat or weak),measurement
     fit={'color':_hx(first),'sample_pixels':len(values),
