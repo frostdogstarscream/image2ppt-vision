@@ -487,11 +487,16 @@ def resolve_typography_policy(source_typography, typography_policy):
     return typography_policy
 
 
-def _script_kind(text):
-    cjk = any('㐀' <= character <= '鿿' or '豈' <= character <= '﫿'
+def _script_counts(text):
+    cjk = sum('㐀' <= character <= '鿿' or '豈' <= character <= '﫿'
               for character in text)
-    latin = any(character.isascii() and (character.isalpha() or character.isdigit())
+    latin = sum(character.isascii() and (character.isalpha() or character.isdigit())
                 for character in text)
+    return cjk, latin
+
+
+def _script_kind(text):
+    cjk, latin = _script_counts(text)
     return 'mixed' if cjk and latin else 'cjk' if cjk else 'latin'
 
 
@@ -559,12 +564,26 @@ def _apply_typography(node, estimate, row, *, geometry_policy, source_size, targ
     row['before'] = {key: deepcopy(node.get(key)) for key in ('bbox', 'font', 'bold', 'color', 'runs')}
     size_pt = round(size * scale * .75, 4)
     measured_family = estimate['font_family']
-    if _script_kind(node.get('text', '')) == 'mixed':
-        # A single fitted family cannot describe both scripts. Keep the model's
-        # Latin choice and apply the measured family only to the East Asian side.
-        latin = deepcopy((node.get('font') or {}).get('latin') or measured_family)
-        node['font'] = {'latin': latin, 'ea': measured_family, 'size_pt': size_pt}
-        row['font_scope'] = 'ea_only_mixed_script'
+    kind = _script_kind(node.get('text', ''))
+    if kind == 'mixed':
+        cjk, latin_count = _script_counts(node.get('text', ''))
+        latin_share = latin_count / float(cjk + latin_count)
+        proposal = node.get('font') or {}
+        proposed_latin = deepcopy(proposal.get('latin') or measured_family)
+        proposed_ea = deepcopy(proposal.get('ea') or measured_family)
+        if latin_share <= .25:
+            # A few Latin characters inside a CJK line: the fitted family is
+            # still the best evidence for the whole line.
+            node['font'] = {'latin': measured_family, 'ea': measured_family, 'size_pt': size_pt}
+            row['font_scope'] = 'mixed_ea_dominant_measured_family'
+        elif latin_share >= .75:
+            node['font'] = {'latin': measured_family, 'ea': proposed_ea, 'size_pt': size_pt}
+            row['font_scope'] = 'mixed_latin_dominant_ea_preserved'
+        else:
+            # A genuinely balanced line: a single fitted family cannot describe
+            # both scripts, so keep the model's Latin choice.
+            node['font'] = {'latin': proposed_latin, 'ea': measured_family, 'size_pt': size_pt}
+            row['font_scope'] = 'mixed_balanced_ea_only'
     else:
         node['font'] = {'latin': measured_family, 'ea': measured_family, 'size_pt': size_pt}
         row['font_scope'] = 'both_sides_single_script'

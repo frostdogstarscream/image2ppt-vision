@@ -430,11 +430,21 @@ def test_policy_typography_keeps_latin_font_for_mixed_script(tmp_path, monkeypat
     report, row, calibrated, _ = _run_policy(
         tmp_path, monkeypatch, node, _eligible_estimate(),
         source_typography=True, typography_policy="typography")
-    assert row["applied"] and row["font_scope"] == "ea_only_mixed_script"
+    assert row["applied"] and row["font_scope"] == "mixed_balanced_ea_only"
     assert calibrated["font"]["ea"] == "MeasuredFont"
     assert calibrated["font"]["latin"] == "ProposalLatin"
     assert calibrated["bold"] is True and calibrated["color"] == "112233"
     assert calibrated["font"]["size_pt"] == 14.25 * .75
+
+
+def test_policy_typography_uses_measured_family_for_ea_dominant_line(tmp_path, monkeypatch):
+    node = _policy_node(text="AI生成文稿并提供优化建议")
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(),
+        source_typography=True, typography_policy="typography")
+    assert row["font_scope"] == "mixed_ea_dominant_measured_family"
+    assert calibrated["font"]["latin"] == "MeasuredFont"
+    assert calibrated["font"]["ea"] == "MeasuredFont"
 
 
 def test_geometry_policy_diagnostic_keeps_proposal_bbox(tmp_path, monkeypatch):

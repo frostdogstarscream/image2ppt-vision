@@ -453,11 +453,14 @@ def _fit_font(text, ink, candidates):
     fits.sort(key=lambda f: (f["loss"], f["path"], f["size"]))
     best_fine = next((fit for fit in fits if fit.get("fine")), None)
     best = coarse_best
-    if (subpixel_effective and best_fine is not None and
-            best_fine["loss"] < coarse_best["loss"] - 1e-9 and
-            best_fine["dimension_error"] <= max(coarse_best["dimension_error"],
-                                                FONT_STRICT_DIMENSION_LIMIT) + 1e-9):
-        best = best_fine
+    if subpixel_effective and best_fine is not None:
+        dimension_gain = coarse_best["dimension_error"] - best_fine["dimension_error"]
+        loss_gain = coarse_best["loss"] - best_fine["loss"]
+        # A refined size must improve the physical size measurement, not just
+        # shape overlap. Tiny changes stay on the coarse grid.
+        if (best_fine["dimension_error"] <= coarse_best["dimension_error"] + 1e-9 and
+                (dimension_gain >= .03 or loss_gain >= .05)):
+            best = best_fine
     different_family = next((f for f in fits if f["family"] != best["family"]), None)
     best["family_margin"] = (different_family["loss"] - best["loss"]) if different_family else None
     best["size_search"] = {
