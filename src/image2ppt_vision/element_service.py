@@ -1,5 +1,5 @@
 """Source-bound HTTP element reconstruction, with no model/network calls."""
-import json
+import json,re
 from .storage import digest, read_json, write_json
 from .supervised_elements import validate_element_plan, materialize_elements
 
@@ -15,7 +15,7 @@ def validate_payload(plan):
         if len(json.dumps(plan, allow_nan=False).encode()) > 1_000_000:
             raise ValueError("element plan exceeds one MB")
         _keys(plan, ("schema", "source_sha256", "image_size", "background_color",
-                     "objects", "text_decisions", "limitations"),
+                     "objects", "text_decisions", "limitations", "groups"),
               ("schema", "source_sha256", "image_size", "background_color", "objects", "text_decisions"))
         if not isinstance(plan["objects"], list) or not isinstance(plan["text_decisions"], list):
             raise ValueError("element lists required")
@@ -23,7 +23,10 @@ def validate_payload(plan):
             raise ValueError("element count exceeds limit")
         for obj in plan["objects"]:
             _keys(obj, ("id", "kind", "bbox", "z", "candidate_id", "label", "geometry",
-                        "fill", "line", "corner_radius_px", "fill_gradient", "mask", "contains_text_ids", "rationale"),
+                        "fill", "line", "corner_radius_px", "fill_gradient", "mask", "contains_text_ids", "rationale",
+                        "rows", "font", "column_tracks", "header_row", "banded_rows", "row_heights",
+                        "merges", "cell_styles", "chart_type", "title", "categories", "series",
+                        "has_legend", "legend_position"),
                   ("id", "kind", "bbox", "z"))
             for field in ("label", "rationale"):
                 if field in obj and (not isinstance(obj[field],str) or len(obj[field])>4000):
@@ -48,6 +51,10 @@ def validate_payload(plan):
                     previous = stop["offset"]; _color(stop["color"])
             if "corner_radius_px" in obj and (type(obj["corner_radius_px"]) not in (int, float) or not 0 <= obj["corner_radius_px"] <= 1000):
                 raise ValueError("invalid corner radius")
+        if sum(obj.get("kind") == "table" for obj in plan["objects"]) > 100:
+            raise ValueError("too many tables")
+        if sum(obj.get("kind") == "chart" for obj in plan["objects"]) > 25:
+            raise ValueError("too many charts")
         for text in plan["text_decisions"]:
             _keys(text, ("id", "action", "text", "bbox", "font_size_px", "bold", "color",
                          "z", "align", "runs", "font_family", "font_latin", "font_confidence", "font_evidence"),
@@ -65,6 +72,18 @@ def validate_payload(plan):
                     if "color" in run: _color(run["color"])
                     if "bold" in run and type(run["bold"]) is not bool:
                         raise ValueError("invalid run weight")
+        groups = plan.get("groups", [])
+        if not isinstance(groups, list) or len(groups) > 100:
+            raise ValueError("invalid groups")
+        for group in groups:
+            _keys(group, ("id", "member_ids", "label"), ("id", "member_ids"))
+            if (not isinstance(group["id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,70}", group["id"]) or
+                    not isinstance(group["member_ids"], list) or not 2 <= len(group["member_ids"]) <= 500 or
+                    any(not isinstance(member, str) for member in group["member_ids"]) or
+                    len(set(group["member_ids"])) != len(group["member_ids"])):
+                raise ValueError("invalid group")
+            if "label" in group and (not isinstance(group["label"], str) or len(group["label"]) > 4000):
+                raise ValueError("invalid group label")
         limitations = plan.get("limitations", [])
         if not isinstance(limitations, list) or len(limitations) > 100 or any(not isinstance(s, str) or len(s) > 4000 for s in limitations):
             raise ValueError("invalid limitations")

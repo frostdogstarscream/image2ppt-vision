@@ -201,6 +201,27 @@ def test_typography_policy_is_rejected_outside_element_reconstruction(case):
         assert api.post("/v1/jobs",headers=AUTH,json=bad).status_code==422
 
 
+def test_http_accepts_native_table_chart_and_group(case):
+    store,_,request,_=case
+    plan=deepcopy(request["element_plan"])
+    plan["objects"].append({"id":"table","kind":"table","bbox":[40,20,120,60],"z":0,
+        "rows":[["项目","数量"],["A","1"]],"font":{"latin":"Arial","ea":"微软雅黑","size_px":10},
+        "header_row":True})
+    plan["objects"].append({"id":"chart","kind":"chart","bbox":[200,20,150,80],"z":1,
+        "chart_type":"bar","categories":["A","B"],"series":[{"name":"数量","values":[1,2]}],
+        "font":{"latin":"Arial","ea":"微软雅黑","size_px":10},"has_legend":False})
+    plan["objects"][0]["z"]=2
+    plan["text_decisions"][0]["z"]=3
+    plan["groups"]=[{"id":"top","member_ids":["table","chart"]}]
+    request["element_plan"]=plan
+    job=store.submit(Request(**request))["id"];engine.execute(store.root,job)
+    ir=read_json(store.path("jobs",job)/"reconstruction/calibrated/slideir.json")
+    assert {"table","chart","shape","text"}<={node["type"] for node in ir["nodes"]}
+    assert ir["groups"]==[{"id":"top","member_ids":["table","chart"]}]
+    quality=read_json(store.path("jobs",job)/"reconstruction/quality.json")
+    assert quality["status"]=="REVIEW_REQUIRED"
+
+
 def test_remote_client_downloads_formal_element_bundle(case,monkeypatch,tmp_path):
     from argparse import Namespace
     store,source,request,_=case

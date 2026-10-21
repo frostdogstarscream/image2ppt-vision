@@ -10,9 +10,30 @@ import json,math,re,shutil
 from pathlib import Path
 from PIL import Image,ImageDraw
 from .storage import digest,write_json
-from .font_contract import validate_font_proposal, resolve_font
+from .font_contract import validate_font_proposal, resolve_font, family_name
+from .typography import font_status
 
 GEOMETRIES={'rect','roundRect','ellipse','line','chevron','pentagon','rightArrow','leftArrow','trapezoid','parallelogram','hexagon','diamond','triangle'}
+CHART_TYPES={'bar','line','area','pie','doughnut'}
+LEGEND_POSITIONS={'left','top','topRight','right','bottom'}
+
+
+def _finite_number(value,minimum=None,maximum=None):
+    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value):
+        return False
+    return (minimum is None or value>=minimum) and (maximum is None or value<=maximum)
+
+
+def _native_font(obj,scale):
+    spec=obj.get('font')
+    if not isinstance(spec,dict) or set(spec)-{'latin','ea','size_px'}:
+        raise ValueError('native table/chart requires font latin/ea/size_px')
+    family=family_name(spec.get('ea'));latin=family_name(spec.get('latin'))
+    if family not in font_status()['families'] or latin not in font_status()['families']:
+        raise ValueError('font unavailable in verified catalog')
+    if not _finite_number(spec.get('size_px'),.1,400):
+        raise ValueError('invalid native font size')
+    return {'latin':latin,'ea':family,'size_pt':round(spec['size_px']*scale*.75,4)}
 
 def _box(box,size):
     if not isinstance(box,list) or len(box)!=4 or any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) for v in box):raise ValueError('invalid bbox')
@@ -96,6 +117,66 @@ def validate_element_plan(plan,inventory):
                 if tid not in ocr or tid in retained:raise ValueError('invalid raster text owner')
                 if _intersection(obj['bbox'],ocr[tid]['bbox'])<ocr[tid]['bbox'][2]*ocr[tid]['bbox'][3]*.95:raise ValueError('raster does not contain declared text')
                 retained[tid]=obj['id']
+        elif obj['kind']=='table':
+            rows=obj.get('rows')
+            if not isinstance(rows,list) or not 1<=len(rows)<=2000:raise ValueError('table rows must be 1-2000')
+            if not isinstance(rows[0],list):raise ValueError('invalid table shape')
+            cols=len(rows[0])
+            if not 1<=cols<=100 or any(not isinstance(row,list) or len(row)!=cols for row in rows):raise ValueError('invalid table shape')
+            for row in rows:
+                for cell in row:
+                    if isinstance(cell,bool) or not ((isinstance(cell,str) and len(cell)<=2048) or _finite_number(cell)):raise ValueError('invalid table cell')
+            _native_font(obj,1280/size[0])
+            if obj.get('column_tracks') is not None:
+                tracks=obj['column_tracks']
+                if not isinstance(tracks,list) or len(tracks)!=cols:raise ValueError('invalid column tracks')
+                for track in tracks:
+                    if not isinstance(track,dict) or track.get('mode') not in ('fr','fixed') or not _finite_number(track.get('value'),.0001):raise ValueError('invalid column track')
+            for key in ('header_row','banded_rows'):
+                if key in obj and not isinstance(obj[key],bool):raise ValueError('invalid table style flag')
+            if obj.get('row_heights') is not None:
+                heights=obj['row_heights']
+                if (not isinstance(heights,list) or len(heights)!=len(rows) or
+                        any(not _finite_number(value,.0001) for value in heights)):raise ValueError('invalid row heights')
+                target_height=round(size[1]*1280/size[0])
+                if abs(sum(heights)-obj['bbox'][3]*target_height/size[1])>.01:raise ValueError('row heights sum mismatch')
+            occupied=set()
+            for merge in obj.get('merges',[]):
+                if not isinstance(merge,dict) or any(not isinstance(merge.get(k),int) or isinstance(merge.get(k),bool) for k in ('row','column','row_span','column_span')):raise ValueError('invalid table merge')
+                if not (merge['row']>=0 and merge['column']>=0 and merge['row_span']>=1 and merge['column_span']>=1 and merge['row_span']*merge['column_span']>1 and merge['row']+merge['row_span']<=len(rows) and merge['column']+merge['column_span']<=cols):raise ValueError('table merge outside bounds')
+                for row_index in range(merge['row'],merge['row']+merge['row_span']):
+                    for column_index in range(merge['column'],merge['column']+merge['column_span']):
+                        key=(row_index,column_index)
+                        if key in occupied:raise ValueError('overlapping table merges')
+                        occupied.add(key)
+                        if (row_index,column_index)!=(merge['row'],merge['column']) and rows[row_index][column_index]!='':raise ValueError('merge covers non-empty cell')
+            styled=set()
+            for style in obj.get('cell_styles',[]):
+                if not isinstance(style,dict) or any(not isinstance(style.get(k),int) or isinstance(style.get(k),bool) for k in ('row','column')):raise ValueError('invalid cell style')
+                row_index,column_index=style['row'],style['column']
+                if not (0<=row_index<len(rows) and 0<=column_index<cols) or (row_index,column_index) in styled:raise ValueError('cell style outside bounds or duplicate')
+                styled.add((row_index,column_index))
+                if 'fill' in style:_color(style['fill'])
+                if 'color' in style:_color(style['color'])
+                if 'bold' in style and not isinstance(style['bold'],bool):raise ValueError('invalid cell bold')
+        elif obj['kind']=='chart':
+            if obj.get('chart_type') not in CHART_TYPES:raise ValueError('unsupported chart type')
+            title=obj.get('title')
+            if title is not None and (not isinstance(title,str) or not title.strip() or title.strip().lower().replace(' ','')=='charttitle'):raise ValueError('invalid chart title')
+            categories=obj.get('categories')
+            if not isinstance(categories,list) or not 1<=len(categories)<=1000 or any(not isinstance(c,str) or len(c)>2000 for c in categories):raise ValueError('invalid chart categories')
+            series=obj.get('series')
+            if not isinstance(series,list) or not 1<=len(series)<=128:raise ValueError('invalid chart series')
+            points=0
+            for item in series:
+                if not isinstance(item,dict) or not isinstance(item.get('name'),str) or not item['name'].strip() or len(item['name'])>2000:raise ValueError('invalid chart series name')
+                values=item.get('values')
+                if not isinstance(values,list) or len(values)!=len(categories) or any(not (v is None or _finite_number(v)) for v in values):raise ValueError('invalid chart values')
+                points+=len(values)
+            if points>100000:raise ValueError('chart has too many points')
+            _native_font(obj,1280/size[0])
+            if 'has_legend' in obj and not isinstance(obj['has_legend'],bool):raise ValueError('invalid legend flag')
+            if 'legend_position' in obj and obj['legend_position'] not in LEGEND_POSITIONS:raise ValueError('invalid legend position')
         else:raise ValueError('invalid object kind')
     for t in texts:
         _box(t['bbox'],size);_color(t['color'])
@@ -105,6 +186,21 @@ def validate_element_plan(plan,inventory):
         if type(t['font_size_px']) not in (int,float) or not math.isfinite(t['font_size_px']):raise ValueError('invalid typography')
         if t['action']=='native':validate_font_proposal(t,required=plan['schema']=='ElementPlan/2')
         if t.get('runs') and ''.join(r['text'] for r in t['runs'])!=t['text']:raise ValueError('run text mismatch')
+    groups=plan.get('groups',[])
+    if not isinstance(groups,list) or len(groups)>100:raise ValueError('invalid groups')
+    order_ids=[item['id'] for item in sorted(
+        objects+[t for t in texts if t['action']=='native'],key=lambda item:item['z'])]
+    allowed=set(order_ids);group_ids=set();grouped=set()
+    for group in groups:
+        if not isinstance(group,dict) or set(group)-{'id','member_ids','label'}:raise ValueError('invalid group fields')
+        group_id=group.get('id');members=group.get('member_ids')
+        if not isinstance(group_id,str) or not re.fullmatch('[A-Za-z0-9_-]{1,70}',group_id) or group_id in ids or group_id in group_ids:raise ValueError('invalid or duplicate group id')
+        if not isinstance(members,list) or not 2<=len(members)<=500 or len(members)!=len(set(members)):raise ValueError('invalid group members')
+        if any(member not in allowed for member in members):raise ValueError('group member missing')
+        if any(member in grouped for member in members):raise ValueError('member belongs to multiple groups')
+        indexes=sorted(order_ids.index(member) for member in members)
+        if indexes[-1]-indexes[0]+1!=len(indexes):raise ValueError('group members are not contiguous in z order')
+        grouped.update(members);group_ids.add(group_id)
     conflicts=raster_text_conflicts(plan,inventory)
     if conflicts:raise ValueError('native text duplicates raster pixels: '+conflicts[0]['text_id']+' / '+conflicts[0]['asset_id'])
     return deepcopy(plan)
@@ -120,11 +216,22 @@ def materialize_elements(source,inventory,plan,output,*,model_id,response_sha256
     output.mkdir(parents=True);(output/'assets').mkdir();(output/'source').mkdir();shutil.copyfile(source,output/'source/page.png')
     scale=1280/image.width;nodes=[];evidence=[];assets=[];decisions={};corrections=[];font_proposals={}
     for obj in plan['objects']:
-        eid='ev-'+obj['id'];evidence.append({'id':eid,'kind':'shape' if obj['kind']=='native_shape' else 'image','bbox':obj['bbox'],'description':obj.get('label',obj['id'])})
-        node={'id':obj['id'],'type':'shape' if obj['kind']=='native_shape' else 'image','bbox':obj['bbox'],'z':obj['z'],'evidence_ids':[eid]}
+        eid='ev-'+obj['id'];kind='image' if obj['kind']=='raster_asset' else 'shape'
+        evidence.append({'id':eid,'kind':kind,'bbox':obj['bbox'],'description':obj.get('label',obj['id'])})
+        node_type={'native_shape':'shape','raster_asset':'image','table':'table','chart':'chart'}[obj['kind']]
+        node={'id':obj['id'],'type':node_type,'bbox':obj['bbox'],'z':obj['z'],'evidence_ids':[eid]}
         if obj['kind']=='native_shape':
             for k in ('geometry','fill','line','corner_radius_px','fill_gradient'):
                 if k in obj:node[k]=obj[k]
+        elif obj['kind']=='table':
+            node.update(rows=deepcopy(obj['rows']),font=_native_font(obj,scale))
+            for k in ('column_tracks','header_row','banded_rows','row_heights','merges','cell_styles'):
+                if k in obj:node[k]=deepcopy(obj[k])
+        elif obj['kind']=='chart':
+            node.update(chart_type=obj['chart_type'],font=_native_font(obj,scale),
+                        categories=deepcopy(obj['categories']),series=deepcopy(obj['series']))
+            for k in ('title','has_legend','legend_position'):
+                if k in obj:node[k]=deepcopy(obj[k])
         else:
             x,y,w,h=obj['bbox'];bounds=(math.floor(x),math.floor(y),math.ceil(x+w),math.ceil(y+h));crop=image.crop(bounds)
             # Preserve interior white glyphs. No global color key / text erasure.
@@ -150,9 +257,9 @@ def materialize_elements(source,inventory,plan,output,*,model_id,response_sha256
     nodes.sort(key=lambda n:n['z'])
     for z,node in enumerate(nodes):node['z']=z
     limitations=plan.get('limitations',[])
-    ir={'schema_version':'0.1','source_image':'source/page.png','source_sha256':digest(source),'canvas':{'source_px':list(image.size),'target_px':[1280,round(image.height*scale)]},'background':{'color':plan['background_color']},'review_status':'needs_review','review_notes':['Experimental supervised element reconstruction; no page residual bitmap.','Native emission does not prove geometric accuracy. Raster icons remain raster.',*limitations],'evidence':evidence,'nodes':nodes,'assets':assets,'groups':[]}
+    ir={'schema_version':'0.1','source_image':'source/page.png','source_sha256':digest(source),'canvas':{'source_px':list(image.size),'target_px':[1280,round(image.height*scale)]},'background':{'color':plan['background_color']},'review_status':'needs_review','review_notes':['Experimental supervised element reconstruction; no page residual bitmap.','Native emission does not prove geometric accuracy. Raster icons remain raster.',*limitations],'evidence':evidence,'nodes':nodes,'assets':assets,'groups':deepcopy(plan.get('groups',[]))}
     write_json(output/'slideir.json',ir);write_json(output/'element-plan.json',plan)
-    report={'schema':'ElementReconstruction/1','model_id':model_id,'response_sha256':response_sha256,'source_sha256':digest(source),'native_shapes':sum(n['type']=='shape' for n in nodes),'native_text':sum(n['type']=='text' for n in nodes),'raster_assets':len(assets),'whole_page_residual':False,'text_corrections':corrections,'fidelity_verified':False,'human_acceptance':False,'limitations':limitations}
+    report={'schema':'ElementReconstruction/1','model_id':model_id,'response_sha256':response_sha256,'source_sha256':digest(source),'native_shapes':sum(n['type']=='shape' for n in nodes),'native_text':sum(n['type']=='text' for n in nodes),'native_tables':sum(n['type']=='table' for n in nodes),'native_charts':sum(n['type']=='chart' for n in nodes),'groups':len(ir['groups']),'raster_assets':len(assets),'whole_page_residual':False,'text_corrections':corrections,'fidelity_verified':False,'human_acceptance':False,'limitations':limitations}
     write_json(output/'reconstruction.json',report)
     write_json(output/'authoring.json',{'format_version':'1','tool':'supervised-element-experiment','model_id':model_id,'created_at':datetime.now(timezone.utc).isoformat(),'ir_sha256':digest(output/'slideir.json'),'node_decisions':decisions,'review_notes':ir['review_notes'],'unresolved_ids':[],'model_typography':font_proposals})
     return report

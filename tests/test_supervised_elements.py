@@ -59,3 +59,52 @@ def test_gradient_without_fallback_fill_is_canonicalized_without_mutating_respon
     _,inv,p=fixture(tmp_path);p['objects'][0].pop('fill');p['objects'][0]['fill_gradient']={'angle_deg':0,'stops':[{'offset':0,'color':'FFFFFF'},{'offset':100000,'color':'AABBCC'}]};p['objects'][0]['line']=None
     result=validate_element_plan(p,inv)
     assert result['objects'][0]['fill']=='FFFFFF' and 'line' not in result['objects'][0] and 'fill' not in p['objects'][0]
+
+
+def _structure_plan(p):
+    p=deepcopy(p)
+    p['objects']=[
+        {'id':'card','kind':'native_shape','bbox':[20,20,300,130],'geometry':'roundRect','fill':'EEEEFF','z':0},
+        {'id':'table','kind':'table','bbox':[30,30,180,80],'z':1,
+         'rows':[['项目','数量'],['A','1']],'font':{'latin':'Arial','ea':'微软雅黑','size_px':12},
+         'header_row':True,'banded_rows':True},
+        {'id':'chart','kind':'chart','bbox':[220,30,150,100],'z':2,'chart_type':'bar',
+         'title':'数量','categories':['A','B'],'series':[{'name':'数量','values':[1,2]}],
+         'font':{'latin':'Arial','ea':'微软雅黑','size_px':12},'has_legend':False},
+    ]
+    p['text_decisions'][0]['z']=3
+    p['groups']=[{'id':'g1','member_ids':['card','table']}]
+    return p
+
+
+def test_table_chart_and_group_materialize_as_native_structure(tmp_path):
+    source,inv,p=fixture(tmp_path);p=_structure_plan(p)
+    validate_element_plan(p,inv)
+    out=tmp_path/'out'
+    report=materialize_elements(source,inv,p,out,model_id='fixture',response_sha256='0'*64)
+    ir=json.loads((out/'slideir.json').read_text(encoding='utf8'))
+    types={node['type'] for node in ir['nodes']}
+    assert {'shape','table','chart','text'}<=types
+    table=next(node for node in ir['nodes'] if node['type']=='table')
+    chart=next(node for node in ir['nodes'] if node['type']=='chart')
+    assert table['rows']==[['项目','数量'],['A','1']] and table['header_row'] is True
+    assert chart['chart_type']=='bar' and chart['categories']==['A','B']
+    assert ir['groups']==[{'id':'g1','member_ids':['card','table']}]
+    assert report['native_tables']==1 and report['native_charts']==1 and report['groups']==1
+
+
+def test_group_must_be_contiguous_and_table_merges_must_not_overlap(tmp_path):
+    source,inv,p=fixture(tmp_path);p=_structure_plan(p)
+    p['groups']=[{'id':'g1','member_ids':['card','chart']}]
+    with pytest.raises(ValueError,match='not contiguous'):validate_element_plan(p,inv)
+    p=_structure_plan(fixture(tmp_path)[2])
+    p['objects'][1]['rows']=[['','',''],['','',''],['','','']]
+    p['objects'][1]['merges']=[{'row':0,'column':0,'row_span':2,'column_span':2},
+                               {'row':1,'column':1,'row_span':2,'column_span':2}]
+    with pytest.raises(ValueError,match='overlapping'):validate_element_plan(p,inv)
+
+
+def test_table_and_chart_require_an_available_font(tmp_path):
+    _,inv,p=fixture(tmp_path);p=_structure_plan(p)
+    p['objects'][1]['font']['ea']='NotInstalledFamily'
+    with pytest.raises(ValueError,match='font unavailable'):validate_element_plan(p,inv)
