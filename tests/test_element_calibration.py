@@ -349,3 +349,109 @@ def test_glyph_ink_repairs_dark_text_when_font_refused(tmp_path, monkeypatch):
     assert row["source_color_applied"] and row["source_color_basis"] == "glyph_ink"
     calibrated = json.loads((output / "slideir.json").read_text(encoding="utf-8"))
     assert calibrated["nodes"][0]["color"] != "FFFFFF"
+
+
+def _policy_node(text="标题", runs=None):
+    return {"id": "t1", "type": "text", "text": text, "bbox": [10, 10, 60, 20],
+            "source_text_bbox": [10, 10, 60, 20],
+            "font": {"latin": "ProposalLatin", "ea": "ProposalEA", "size_pt": 10},
+            "bold": False, "color": "FFFFFF", "runs": runs or [], "align": "center",
+            "wrap": False}
+
+
+def _eligible_estimate(**overrides):
+    estimate = {"native_eligible": True, "bbox": [12, 12, 56, 18],
+                "font_family": "MeasuredFont", "font_size_px": 14.25, "bold": True,
+                "color": "#112233", "runs": None,
+                "diagnostics": {"reason": "fixture", "foreground_color_count": 1,
+                                "background": {"reliable": True},
+                                "font": {"render_origin": [11, 11], "glyph_bbox": [1, 1, 55, 17],
+                                         "shape_overlap": .9, "dimension_error": .05,
+                                         "font_path": "missing-font-fixture"}}}
+    estimate.update(overrides)
+    return estimate
+
+
+def _run_policy(tmp_path, monkeypatch, node, estimate, **kwargs):
+    pixels = np.full((80, 160, 3), 245, np.uint8)
+    proposal = _write_ir(tmp_path, pixels, [node])
+    monkeypatch.setattr("image2ppt_vision.element_calibration.estimate_text",
+                        lambda *a, **k: deepcopy(estimate))
+    output = tmp_path / "calibrated"
+    calibrate_elements(proposal / "slideir.json", output, calibrate_fills=True, **kwargs)
+    report = json.loads((output / "calibration.json").read_text(encoding="utf-8"))
+    calibrated = json.loads((output / "slideir.json").read_text(encoding="utf-8"))
+    row = next(item for item in report["diagnostics"] if item["kind"] == "typography")
+    return report, row, calibrated["nodes"][0], calibrated
+
+
+def test_policy_diagnostic_measures_without_applying(tmp_path, monkeypatch):
+    node = _policy_node()
+    report, row, calibrated, authoring_ir = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(),
+        source_typography=True, typography_policy="diagnostic")
+    assert report["typography_policy"] == "diagnostic"
+    assert row["policy"] == "diagnostic" and not row["applied"]
+    assert row["proposal"]["color"] == "FFFFFF" and row["source_color"] == "#112233"
+    assert calibrated["color"] == "FFFFFF" and calibrated["bbox"] == [10, 10, 60, 20]
+    assert calibrated["font"]["ea"] == "ProposalEA"
+    assert report["typography_applied"] == 0
+
+
+def test_policy_color_preserves_font_geometry_and_runs(tmp_path, monkeypatch):
+    runs = [{"text": "标", "color": "FFFFFF"}, {"text": "题", "color": "FFFFFF"}]
+    node = _policy_node(runs=runs)
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(),
+        source_typography=True, typography_policy="color")
+    assert calibrated["color"] == "112233"
+    assert calibrated["font"]["ea"] == "ProposalEA"
+    assert calibrated["bbox"] == [10, 10, 60, 20]
+    assert [run["color"] for run in calibrated["runs"]] == ["112233", "112233"]
+    assert row["applied_fields"] == ["color"] and row["source_color_basis"] == "typography_estimate"
+    assert report["typography_applied"] == 0 and report["source_color_only_applied"] == 1
+
+
+def test_policy_typography_protects_mixed_colour_runs(tmp_path, monkeypatch):
+    runs = [{"text": "标", "color": "FF0000"}, {"text": "题", "color": "0000FF"}]
+    node = _policy_node(runs=runs)
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(),
+        source_typography=True, typography_policy="typography")
+    assert row["reason"] == "mixed_runs_protected"
+    assert calibrated["font"]["ea"] == "ProposalEA" and calibrated["color"] == "FFFFFF"
+    assert calibrated["runs"] == runs
+    assert report["typography_applied"] == 0
+
+
+def test_policy_typography_keeps_latin_font_for_mixed_script(tmp_path, monkeypatch):
+    node = _policy_node(text="AI赋能")
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(),
+        source_typography=True, typography_policy="typography")
+    assert row["applied"] and row["font_scope"] == "ea_only_mixed_script"
+    assert calibrated["font"]["ea"] == "MeasuredFont"
+    assert calibrated["font"]["latin"] == "ProposalLatin"
+    assert calibrated["bold"] is True and calibrated["color"] == "112233"
+    assert calibrated["font"]["size_pt"] == 14.25 * .75
+
+
+def test_geometry_policy_diagnostic_keeps_proposal_bbox(tmp_path, monkeypatch):
+    node = _policy_node()
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(),
+        source_typography=True, typography_policy="typography",
+        geometry_policy="diagnostic")
+    assert row["applied"] and row["geometry_policy"] == "kept_proposal"
+    assert calibrated["bbox"] == [10, 10, 60, 20]
+    assert "geometry" not in row["applied_fields"]
+    assert calibrated["font"]["ea"] == "MeasuredFont"
+
+
+def test_legacy_boolean_still_maps_to_full_policy(tmp_path, monkeypatch):
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, _policy_node(), _eligible_estimate(),
+        source_typography=True)
+    assert report["typography_policy"] == "typography"
+    assert row["applied"] and report["typography_applied"] == 1
+    assert calibrated["font"]["ea"] == "MeasuredFont"

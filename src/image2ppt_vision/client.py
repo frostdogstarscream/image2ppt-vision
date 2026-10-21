@@ -43,7 +43,9 @@ def run(args):
         output=Path(args.output).resolve()
         if output.exists():raise FileExistsError('output must be a new directory')
         opts.update(element_plan=read_json(args.plan),analysis_job_id=args.analysis_job_id,
-                    renderer_version=args.renderer_version)
+                    renderer_version=args.renderer_version,
+                    typography_policy=getattr(args,'typography_policy',None),
+                    geometry_policy=getattr(args,'geometry_policy',None))
     opts.update(operation=args.command,asset_id=upload(args.url,args.input))
     for field,source in [('reference_id',args.reference),('mask_id',args.mask)]:
         if source:opts[field]=upload(args.url,source)

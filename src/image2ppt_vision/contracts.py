@@ -25,6 +25,8 @@ class Request(BaseModel):
     analysis_job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     element_plan: dict | None = None
     renderer_version: str | None = Field(default=None, pattern=r"^\d+\.\d+\.\d+$", max_length=40)
+    typography_policy: Literal["diagnostic", "color", "typography"] | None = None
+    geometry_policy: Literal["diagnostic", "measured"] | None = None
 
     @model_validator(mode="after")
     def consistent(self):
@@ -37,7 +39,8 @@ class Request(BaseModel):
                 raise ValueError("element reconstruction does not accept segmentation or crop prompts")
             from .element_service import validate_payload
             validate_payload(self.element_plan)
-        elif self.analysis_job_id or self.element_plan is not None or self.renderer_version is not None:
+        elif (self.analysis_job_id or self.element_plan is not None or self.renderer_version is not None
+              or self.typography_policy is not None or self.geometry_policy is not None):
             raise ValueError("element reconstruction options only valid for reconstruct_elements")
         if self.operation == "reconstruct":
             if self.plan is None:

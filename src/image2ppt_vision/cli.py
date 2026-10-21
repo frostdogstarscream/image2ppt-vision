@@ -69,6 +69,10 @@ def main(argv=None):
             c.add_argument("--plan",required=True,help="source-bound ElementPlan JSON")
             c.add_argument("--analysis-job-id",required=True,help="successful analysis job with element_inventory")
             c.add_argument("--renderer-version",help="actual downstream Artifact Tool version")
+            c.add_argument("--typography-policy",choices=["diagnostic","color","typography"],
+                           help="source typography application scope; default typography")
+            c.add_argument("--geometry-policy",choices=["diagnostic","measured"],
+                           help="whether measured ink edges may replace the bbox; default measured")
             c.add_argument("--output",required=True,help="new reconstruction/job bundle directory")
     a=p.parse_args(argv)
     if a.command=='calibrate-ocr':
@@ -149,7 +153,9 @@ def main(argv=None):
     opts.update(operation=a.command,asset_id=store.upload(a.input)["id"])
     if a.command == "reconstruct":opts["plan"]=load_plan(a.plan).to_dict()
     if a.command == "reconstruct_elements":
-        opts.update(element_plan=read_json(a.plan),analysis_job_id=a.analysis_job_id,renderer_version=a.renderer_version)
+        opts.update(element_plan=read_json(a.plan),analysis_job_id=a.analysis_job_id,
+                    renderer_version=a.renderer_version,
+                    typography_policy=a.typography_policy,geometry_policy=a.geometry_policy)
     if a.reference:opts["reference_id"]=store.upload(a.reference)["id"]
     if a.mask:opts["mask_id"]=store.upload(a.mask)["id"]
     job=store.submit(Request.model_validate(opts))

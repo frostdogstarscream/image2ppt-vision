@@ -169,6 +169,38 @@ def test_single_source_color_can_repair_visibility_without_claiming_font_fit(cas
     assert report["issues"]==[{"id":"t1","code":"source_typography_refused","reason":"font_or_ocr_shape_mismatch"}]
 
 
+def test_http_typography_policy_scopes_application(case,monkeypatch):
+    store,_,request,_=case
+    monkeypatch.setattr(element_calibration,"estimate_text",lambda *_,**kwargs:{
+        "native_eligible":True,"bbox":[100,60,28,18],"font_size_px":18,
+        "font_family":"fixture","bold":True,"color":"#0B9A8E",
+        "diagnostics":{"font":{"render_origin":[99,57],"glyph_bbox":[0,1,28,17],
+                               "shape_overlap":.9,"dimension_error":.05,
+                               "font_path":"missing-font-fixture"},
+                       "foreground_color_count":1,"background":{"reliable":True},
+                       "reason":"fixture"}})
+    request.update(typography_policy="color",geometry_policy="diagnostic")
+    job=store.submit(Request(**request))["id"];engine.execute(store.root,job)
+    directory=store.path("jobs",job)/"reconstruction"
+    ir=read_json(directory/"calibrated/slideir.json")
+    text=next(n for n in ir["nodes"] if n["type"]=="text")
+    proposal=read_json(directory/"proposal/slideir.json")
+    proposed=next(n for n in proposal["nodes"] if n["type"]=="text")
+    assert text["color"]=="0B9A8E"
+    assert text["font"]==proposed["font"] and text["bbox"]==proposed["bbox"]
+    quality=read_json(directory/"quality.json")
+    assert quality["typography_policy"]=="color" and quality["geometry_policy"]=="diagnostic"
+    assert quality["typography_applied"]==0 and quality["source_color_only_applied"]==1
+
+
+def test_typography_policy_is_rejected_outside_element_reconstruction(case):
+    store,_,request,_=case
+    bad={k:v for k,v in request.items() if k not in ("analysis_job_id","element_plan")}
+    bad.update(operation="analyze",element_inventory=True,typography_policy="color")
+    with TestClient(create_app(store.root,"fixture",run_worker=False)) as api:
+        assert api.post("/v1/jobs",headers=AUTH,json=bad).status_code==422
+
+
 def test_remote_client_downloads_formal_element_bundle(case,monkeypatch,tmp_path):
     from argparse import Namespace
     store,source,request,_=case

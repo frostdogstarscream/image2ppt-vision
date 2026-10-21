@@ -467,7 +467,162 @@ def _tighten(pixels,node,nodes):
     return None
 
 
-def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=None,calibrate_fills=True):
+TYPOGRAPHY_THRESHOLDS = {'shape_overlap': .58, 'dimension_error': .12}
+POLICY_LEVELS = ('diagnostic', 'color', 'typography')
+GEOMETRY_POLICIES = ('diagnostic', 'measured')
+
+
+def resolve_typography_policy(source_typography, typography_policy):
+    """Map the legacy boolean onto the explicit policy scale.
+
+    ``off`` is internal only: it preserves the pre-policy behaviour where text
+    nodes were not measured at all.
+    """
+    if typography_policy is None:
+        return 'typography' if source_typography else 'off'
+    if typography_policy not in POLICY_LEVELS:
+        raise ValueError('invalid typography_policy')
+    return typography_policy
+
+
+def _script_kind(text):
+    cjk = any('㐀' <= character <= '鿿' or '豈' <= character <= '﫿'
+              for character in text)
+    latin = any(character.isascii() and (character.isalpha() or character.isdigit())
+                for character in text)
+    return 'mixed' if cjk and latin else 'cjk' if cjk else 'latin'
+
+
+def _runs_colours(node):
+    return {str(run.get('color', '')).lstrip('#').upper()
+            for run in node.get('runs') or [] if run.get('color')}
+
+
+def _set_source_colour(node, colour, row, basis):
+    node['color'] = colour.lstrip('#')
+    for run in node.get('runs') or []:
+        run['color'] = node['color']
+    row['source_color_applied'] = True
+    row['source_color_basis'] = basis
+    row.setdefault('applied_fields', []).append('color')
+
+
+def _colour_drift(node, colour):
+    declared = _rgb(node.get('color'))
+    if declared is None or colour is None:
+        return None
+    colour = colour.lstrip('#')
+    return float(np.abs(declared - np.array(
+        [int(colour[index:index + 2], 16) for index in (0, 2, 4)])).mean())
+
+
+def _colour_measurement(estimate, pixels, box, policies):
+    """Prefer the typography estimate, fall back to glyph-only evidence."""
+    diagnostics = estimate.get('diagnostics') or {}
+    background = diagnostics.get('background') or {}
+    if (estimate.get('color') and diagnostics.get('foreground_color_count') == 1 and
+            (estimate.get('native_eligible') or background.get('reliable'))):
+        return estimate['color'], 'typography_estimate', None
+    if policies['glyph_ink_evidence']:
+        ink, ink_diagnostics = _ink_measured(pixels, box)
+    else:
+        ink, ink_diagnostics = _ink_legacy(pixels, box), {'method': 'legacy_median'}
+    return (ink or {}).get('color'), ('glyph_ink' if ink else None), ink_diagnostics
+
+
+def _apply_typography(node, estimate, row, *, geometry_policy, source_size, target_size,
+                      scale, renderer_version):
+    """Apply measured typography with per-field guards and a preserved runs list."""
+    runs = node.get('runs') or []
+    if len(runs) > 1 and len(_runs_colours(node)) > 1:
+        row['reason'] = 'mixed_runs_protected'
+        row['guards'] = {'runs': 'protected_mixed_colours'}
+        return False
+    fontdiag = estimate['diagnostics']['font']
+    x, y, bw, bh = estimate['bbox']
+    size = estimate['font_size_px']
+    origin = list(fontdiag['render_origin'])
+    correction = origin_correction(estimate, [source_size[0], source_size[1]],
+                                   [target_size[0], target_size[1]],
+                                   renderer_version=renderer_version or 'unspecified')
+    glyph = fontdiag.get('glyph_bbox')
+    if glyph:
+        # Font matching optimises local overlap and can shift a long line by
+        # many pixels. Restore the measured visible left/top edges instead of
+        # exporting that search translation as layout.
+        origin = [x - glyph[0], y - glyph[1]]
+        row['origin_policy'] = 'measured_ink_edges_minus_font_glyph_bearings'
+    tx = max(0, float(origin[0]))
+    ty = max(0, float(origin[1]) + correction['dy'])
+    row['before'] = {key: deepcopy(node.get(key)) for key in ('bbox', 'font', 'bold', 'color', 'runs')}
+    size_pt = round(size * scale * .75, 4)
+    measured_family = estimate['font_family']
+    if _script_kind(node.get('text', '')) == 'mixed':
+        # A single fitted family cannot describe both scripts. Keep the model's
+        # Latin choice and apply the measured family only to the East Asian side.
+        latin = deepcopy((node.get('font') or {}).get('latin') or measured_family)
+        node['font'] = {'latin': latin, 'ea': measured_family, 'size_pt': size_pt}
+        row['font_scope'] = 'ea_only_mixed_script'
+    else:
+        node['font'] = {'latin': measured_family, 'ea': measured_family, 'size_pt': size_pt}
+        row['font_scope'] = 'both_sides_single_script'
+    node['bold'] = estimate['bold']
+    node['color'] = estimate['color'].lstrip('#')
+    applied = ['font', 'size', 'weight', 'color']
+    if runs:
+        # Never drop authored runs; only their colour follows a single-colour measurement.
+        for run in runs:
+            run['color'] = node['color']
+        row['runs_policy'] = 'preserved'
+    elif estimate.get('runs'):
+        node['runs'] = [{**run, 'color': run['color'].lstrip('#')} for run in estimate['runs']]
+        row['runs_policy'] = 'measured_single_colour_runs'
+    if geometry_policy == 'measured':
+        node['bbox'] = [tx, ty,
+                        min(source_size[0] - tx, max(bw + 3, size * len(node['text']) * .45)),
+                        min(source_size[1] - ty, max(size * 1.5, bh + 4))]
+        applied.append('geometry')
+        row['geometry_policy'] = 'measured_ink_edges'
+    else:
+        row['geometry_policy'] = 'kept_proposal'
+    node['align'] = 'left'
+    row.update(applied=True, applied_fields=applied, renderer_origin_calibration=correction)
+    return True
+
+
+COLOUR_FALLBACK_REASONS = ('font_or_ocr_shape_mismatch', 'strict_source_font_fit_refused',
+                           'no_usable_installed_font', 'non_smooth_or_crossing_background',
+                           'font_environment_unavailable')
+
+
+def _apply_colour_only(node, estimate, row, pixels, box, policies):
+    """Colour repair independent of font/geometry eligibility."""
+    if len(_runs_colours(node)) > 1:
+        row['source_color_refused_reason'] = 'mixed_runs_protected'
+        return False
+    reason = (estimate.get('diagnostics') or {}).get('reason')
+    if not estimate.get('native_eligible') and reason not in COLOUR_FALLBACK_REASONS:
+        row['source_color_refused_reason'] = reason or 'source_measurement_refused'
+        return False
+    colour, basis, ink_diagnostics = _colour_measurement(estimate, pixels, box, policies)
+    row['source_color'] = estimate.get('color')
+    row['source_ink_measure'] = ink_diagnostics if basis == 'glyph_ink' else None
+    if colour is None:
+        row['source_color_refused_reason'] = (
+            (ink_diagnostics or {}).get('reason') or 'no_glyph_colour_evidence')
+        return False
+    drift = _colour_drift(node, colour)
+    if drift is None or drift > 30:
+        _set_source_colour(node, colour, row, basis)
+        if drift is not None:
+            row['declared_color_drift'] = round(drift, 1)
+        return True
+    row['source_color_refused_reason'] = 'declared_color_matches_source'
+    return False
+
+
+def calibrate_elements(irfile,output,*,source_typography=False,typography_policy=None,
+                       geometry_policy='measured',renderer_version=None,calibrate_fills=True):
     irfile=Path(irfile);output=Path(output)
     if output.exists():raise FileExistsError('calibration output must be new')
     ir=read_json(irfile);src=irfile.parent/ir['source_image']
@@ -480,6 +635,9 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
     diagnostics=[];measured=0;fills=0;tightened_count=0
     original_nodes=deepcopy(ir['nodes'])
     policies=policy_flags()
+    policy=resolve_typography_policy(source_typography,typography_policy)
+    if geometry_policy not in GEOMETRY_POLICIES:raise ValueError('invalid geometry_policy')
+    active=policy!='off'
     try:
         environment=collect_environment(ir,renderer_version=renderer_version,
                                         texts=[node['text'] for node in ir['nodes'] if node['type']=='text'])
@@ -488,9 +646,10 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
         environment={'status':'unknown','reason':'environment_probe_failed'}
     for node in ir['nodes']:
         if node['type']=='text':
+            box=node.get('source_text_bbox',node['bbox'])
             try:
-                estimate=estimate_text(pixels,{'id':node['id'],'text':node['text'],'bbox':node.get('source_text_bbox',node['bbox'])},
-                                       **({'isolate_ocr_window':True} if source_typography else {}))
+                estimate=estimate_text(pixels,{'id':node['id'],'text':node['text'],'bbox':box},
+                                       **({'isolate_ocr_window':True} if active else {}))
             except (OSError,ValueError) as error:
                 # A broken font volume is a deployment fact, not a bad proposal.
                 # Keep measuring fills and visible glyph colour where possible.
@@ -498,73 +657,33 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
                           'diagnostics':{'status':'REVIEW_REQUIRED',
                                          'reason':'font_environment_unavailable',
                                          'font_environment_error':type(error).__name__}}
-            if source_typography and estimate.get('native_eligible'):
-                fontdiag=estimate['diagnostics']['font']
-                if fontdiag.get('dimension_error',0)>.12 or fontdiag.get('shape_overlap',1)<.58:
+            if active and estimate.get('native_eligible'):
+                fontdiag=estimate['diagnostics'].get('font') or {}
+                if (fontdiag.get('dimension_error',0)>TYPOGRAPHY_THRESHOLDS['dimension_error'] or
+                        fontdiag.get('shape_overlap',1)<TYPOGRAPHY_THRESHOLDS['shape_overlap']):
                     estimate['native_eligible']=False
                     estimate['diagnostics'].update(status='REVIEW_REQUIRED',reason='strict_source_font_fit_refused')
-            row={'id':node['id'],'kind':'typography','applied':False,'diagnostics':estimate['diagnostics']}
-            if source_typography:
+            row={'id':node['id'],'kind':'typography','policy':policy,'applied':False,
+                 'applied_fields':[],'diagnostics':estimate['diagnostics']}
+            if active:
                 row['proposal']={k:deepcopy(node.get(k)) for k in ('bbox','font','bold','color','runs')}
                 row['proposal_contrast']=_source_contrast(pixels,node)
-            if node['id'] in model_typography and not source_typography:
+            if node['id'] in model_typography and not active:
                 proposal=model_typography[node['id']]
                 if node['font']!=proposal['font'] or node['bold']!=proposal['bold']:raise ValueError('model typography binding changed')
                 row.update(reason='model_typography_preserved',suggestion={k:estimate.get(k) for k in ('font_family','font_size_px','bold','color','bbox')})
-            elif estimate.get('native_eligible'):
-                x,y,bw,bh=estimate['bbox'];size=estimate['font_size_px'];fontdiag=estimate['diagnostics']['font'];origin=fontdiag['render_origin']
-                correction=origin_correction(estimate,[w,h],[tw,th],renderer_version=(renderer_version or "unspecified") if source_typography else renderer_version)
-                if source_typography:
-                    # Font matching optimizes local overlap and can shift a long
-                    # line by many pixels. Restore its measured visible left/top
-                    # edges; do not export that search translation as layout.
-                    glyph=fontdiag.get('glyph_bbox')
-                    if glyph:
-                        origin=[x-glyph[0],y-glyph[1]]
-                        row['origin_policy']='measured_ink_edges_minus_font_glyph_bearings'
-                tx=max(0,float(origin[0]));ty=max(0,float(origin[1])+correction['dy'])
-                row['before']={k:deepcopy(node.get(k)) for k in ('bbox','font','bold','color','runs')}
-                node.update(bbox=[tx,ty,min(w-tx,max(bw+3,size*len(node['text'])*.45)),min(h-ty,max(size*1.5,bh+4))],font={'latin':estimate['font_family'],'ea':estimate['font_family'],'size_pt':round(size*scale*.75,4)},bold=estimate['bold'],color=estimate['color'].lstrip('#'))
-                node.pop('runs',None)
-                if estimate.get('runs'):node['runs']=[{**r,'color':r['color'].lstrip('#')} for r in estimate['runs']]
-                if source_typography:node['align']='left'
-                row.update(applied=True,renderer_origin_calibration=correction);measured+=1
-            if source_typography:
+            elif active and policy=='typography' and estimate.get('native_eligible'):
+                if _apply_typography(node,estimate,row,geometry_policy=geometry_policy,
+                                     source_size=(w,h),target_size=(tw,th),scale=scale,
+                                     renderer_version=renderer_version):
+                    measured+=1
+            if active and not row['applied'] and policy in ('color','typography'):
+                _apply_colour_only(node,estimate,row,pixels,box,policies)
+            if active:
                 row['source_ink_bbox']=estimate.get('bbox')
                 row['source_color']=estimate.get('color')
                 if not row['applied']:
-                    row['reason']=estimate['diagnostics'].get('reason','source_measurement_refused')
-                    # A missing/ambiguous font does not invalidate an isolated,
-                    # single-color foreground. Preserve typography, but repair
-                    # e.g. a white "02" over a light background using source ink.
-                    if (row['reason'] in ('font_or_ocr_shape_mismatch','strict_source_font_fit_refused','no_usable_installed_font')
-                            and estimate.get('color') and estimate['diagnostics'].get('foreground_color_count')==1
-                            and estimate['diagnostics'].get('background',{}).get('reliable')):
-                        node['color']=estimate['color'].lstrip('#')
-                        for run in node.get('runs',[]):run['color']=node['color']
-                        row['source_color_applied']=True
-                        row['source_color_basis']='typography_estimate'
-                    elif row['reason'] in ('font_or_ocr_shape_mismatch','strict_source_font_fit_refused','no_usable_installed_font','non_smooth_or_crossing_background','font_environment_unavailable'):
-                        # A gradient panel defeats the typography estimate's
-                        # smooth-background assumption, but it does not hide the
-                        # glyphs. Measure them, and repair a proposal that
-                        # contradicts them — a white title on a light bar.
-                        if policies['glyph_ink_evidence']:
-                            ink,ink_diagnostics=_ink_measured(pixels,node.get('source_text_bbox',node['bbox']))
-                        else:
-                            ink,ink_diagnostics=_ink_legacy(pixels,node.get('source_text_bbox',node['bbox'])),{'method':'legacy_median'}
-                        declared=_rgb(node.get('color'))
-                        drift=None if (ink is None or declared is None) else float(np.abs(declared-np.array([int(ink['color'][i:i+2],16) for i in (0,2,4)])).mean())
-                        row['source_ink_measure']=ink
-                        row['source_ink_evidence']=ink_diagnostics
-                        if ink is None:
-                            row['source_color_refused_reason']=ink_diagnostics.get('reason')
-                        elif declared is None or drift>30:
-                            node['color']=ink['color']
-                            for run in node.get('runs',[]):run['color']=node['color']
-                            row['source_color_applied']=True
-                            row['source_color_basis']='glyph_ink'
-                            row['declared_color_drift']=None if drift is None else round(drift,1)
+                    row['reason']=row.get('reason') or estimate['diagnostics'].get('reason','source_measurement_refused')
                 row['needs_rendered_review']=True
                 row['output_contrast']=_source_contrast(pixels,node)
                 row['output']={k:deepcopy(node.get(k)) for k in ('bbox','font','bold','color','runs')}
@@ -613,12 +732,19 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
         old=irfile.parent/asset['path'];relative='assets/'+asset['id']+old.suffix;shutil.copyfile(old,output/relative);asset['path']=relative
     ir['review_notes'].append('Source-pixel typography measurements applied where eligible; refused measurements remain proposals. Font and origin estimates require actual-render review. Solid fills changed: '+str(fills)+'.')
     write_json(output/'slideir.json',ir)
-    if source_typography:
+    typography_rows={r['id'] for r in diagnostics if r.get('kind')=='typography' and r.get('applied')}
+    colour_rows={r['id'] for r in diagnostics if r.get('kind')=='typography' and r.get('source_color_applied')}
+    if active:
         authoring['original_model_typography']=model_typography
-        authoring['model_typography']={}
-        authoring['applied_source_typography']={n['id']:{k:deepcopy(n[k]) for k in ('font','bold','color','bbox')} for n in ir['nodes'] if n['type']=='text' and any(r['id']==n['id'] and r['applied'] for r in diagnostics)}
+        # Keep the model font for nodes where the guarded path did not apply it.
+        authoring['model_typography']={key:value for key,value in model_typography.items()
+                                       if key not in typography_rows}
+        authoring['applied_source_typography']={n['id']:{k:deepcopy(n[k]) for k in ('font','bold','color','bbox')} for n in ir['nodes'] if n['type']=='text' and n['id'] in typography_rows}
+        authoring['applied_source_color']={n['id']:deepcopy(n.get('color')) for n in ir['nodes'] if n['type']=='text' and n['id'] in colour_rows}
+        authoring['typography_policy']=policy
+        authoring['geometry_policy']=geometry_policy
     authoring['tool']='supervised-elements source-pixel calibration';authoring['ir_sha256']=digest(output/'slideir.json');authoring['review_notes']=ir['review_notes'];write_json(output/'authoring.json',authoring)
-    report={'schema':'ElementCalibration/1','source_sha256':ir['source_sha256'],'input_ir_sha256':digest(irfile),'output_ir_sha256':digest(output/'slideir.json'),'typography_applied':measured,'source_color_only_applied':sum(bool(r.get('source_color_applied')) for r in diagnostics),'typography_total':sum(n['type']=='text' for n in ir['nodes']),'solid_fills_applied':fills,'geometry_tightened':tightened_count,'environment':environment,'policies':policies,'diagnostics':diagnostics,'human_acceptance':False}
+    report={'schema':'ElementCalibration/1','source_sha256':ir['source_sha256'],'input_ir_sha256':digest(irfile),'output_ir_sha256':digest(output/'slideir.json'),'typography_policy':policy,'geometry_policy':geometry_policy,'typography_applied':measured,'source_color_only_applied':sum(bool(r.get('source_color_applied')) for r in diagnostics),'typography_total':sum(n['type']=='text' for n in ir['nodes']),'solid_fills_applied':fills,'geometry_tightened':tightened_count,'environment':environment,'policies':policies,'diagnostics':diagnostics,'human_acceptance':False}
     write_json(output/'calibration.json',report)
     return {k:v for k,v in report.items() if k!='diagnostics'}
 

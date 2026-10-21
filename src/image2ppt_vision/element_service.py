@@ -126,6 +126,8 @@ def reconstruct(store, request, output):
     # reports drift, and leaves a declaration that matches its pixels alone.
     calibration = calibrate_elements(output/"proposal/slideir.json", output/"calibrated",
                                     source_typography=True,
+                                    typography_policy=request.typography_policy or "typography",
+                                    geometry_policy=request.geometry_policy or "measured",
                                     renderer_version=request.renderer_version,
                                     calibrate_fills=True)
     details = read_json(output/"calibrated/calibration.json")
@@ -145,6 +147,8 @@ def reconstruct(store, request, output):
     quality = {"schema":"ElementServiceQuality/1", "status":"REVIEW_REQUIRED",
                "source_sha256":inventory["source_sha256"], "analysis_job_id":request.analysis_job_id,
                "renderer_version":request.renderer_version, "issues":issues,
+               "typography_policy":calibration["typography_policy"],
+               "geometry_policy":calibration["geometry_policy"],
                "typography_applied":calibration["typography_applied"],
                "source_color_only_applied":calibration["source_color_only_applied"],
                "typography_total":calibration["typography_total"],
