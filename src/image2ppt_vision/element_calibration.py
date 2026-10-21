@@ -1,4 +1,4 @@
-"""Measure model-proposed typography, fills and text ink from the original pixels.
+"""Measure model-proposed typography, fills, text ink and box extents from the original pixels.
 
 This is source-only calibration, not semantic correction or acceptance. Refused
 measurements leave the model proposal unchanged and remain explicit in reports.
@@ -135,6 +135,54 @@ def _fill(pixels,node,nodes):
     # colour with texture the plane cannot capture.
     return flat or weak
 
+def _box_inside(outer,inner):
+    ox,oy,ow,oh=outer;ix,iy,iw,ih=inner
+    if iw<=0 or ih<=0:return False
+    return (ox-4<=ix and oy-4<=iy and ox+ow+4>=ix+iw and oy+oh+4>=iy+ih
+            and (iw*ih)/float(ow*oh)>=.75)
+
+
+def _edge_coverage(crop,colour,tol):
+    mask=np.max(np.abs(crop-colour),axis=2)<=tol
+    frame=np.zeros_like(mask);frame[:3]=True;frame[-3:]=True;frame[:,:3]=True;frame[:,-3:]=True
+    return float(mask[frame].mean())
+
+
+def _tighten(pixels,node,nodes):
+    """Follow a declared border to the element's real extent, or return None.
+
+    The proposal is kept unless the source shows the border somewhere else and
+    that somewhere is a compact, filled region. A box whose border already runs
+    along its own edge is where the shape is; there is nothing to tighten.
+    """
+    colour=_rgb((node.get('line') or {}).get('color'))
+    if colour is None or node.get('geometry') not in ('rect','roundRect'):return None
+    h,w=pixels.shape[:2];x,y,bw,bh=node['bbox'];l,t,r,b=math.floor(x),math.floor(y),math.ceil(x+bw),math.ceil(y+bh)
+    l,t,r,b=max(0,l),max(0,t),min(w,r),min(h,b)
+    if r-l<20 or b-t<12:return None
+    crop=pixels[t:b,l:r].astype(float)
+    if max(_edge_coverage(crop,colour,tol) for tol in (12,18,24))>=.18:return None
+    fill=_rgb(node.get('fill'))
+    for tol in (12,18,24):
+        mask=np.max(np.abs(crop-colour),axis=2)<=tol
+        if int(mask.sum())<120:continue
+        ys,xs=np.where(mask);nw,nh=int(xs.max()-xs.min()+1),int(ys.max()-ys.min()+1)
+        ratio=(nw*nh)/float((r-l)*(b-t))
+        if not .03<=ratio<=.55 or nw<40 or nh<16:continue
+        # A frame, not a fill: text antialiasing can pass through the border colour.
+        inner=mask[ys.min()+4:ys.max()-3,xs.min()+4:xs.max()-3]
+        if inner.size and inner.mean()>.15:continue
+        box=[l+int(xs.min()),t+int(ys.min()),nw,nh]
+        # If the found box is a text node's box, the "border" was glyph antialiasing.
+        if any(o['type']=='text' and _box_inside(box,o.get('source_text_bbox',o['bbox'])) for o in nodes if o['id']!=node['id']):continue
+        # The interior must actually carry the declared fill.
+        if fill is not None:
+            inside=crop[ys.min()+3:ys.max()-2,xs.min()+3:xs.max()-2].reshape(-1,3)
+            if inside.size and (np.max(np.abs(inside-fill),axis=1)<24).mean()<.35:continue
+        return box
+    return None
+
+
 def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=None,calibrate_fills=True):
     irfile=Path(irfile);output=Path(output)
     if output.exists():raise FileExistsError('calibration output must be new')
@@ -145,7 +193,7 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
     if digest(src)!=ir['source_sha256']:raise ValueError('source binding changed')
     with Image.open(src) as im:pixels=np.array(im.convert('RGB'))
     w,h=ir['canvas']['source_px'];tw,th=ir['canvas']['target_px'];scale=tw/w
-    diagnostics=[];measured=0;fills=0
+    diagnostics=[];measured=0;fills=0;tightened_count=0
     original_nodes=deepcopy(ir['nodes'])
     for node in ir['nodes']:
         if node['type']=='text':
@@ -217,6 +265,10 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
                 row['output']={k:deepcopy(node.get(k)) for k in ('bbox','font','bold','color','runs')}
             diagnostics.append(row)
         elif node['type']=='shape' and calibrate_fills:
+            tightened=_tighten(pixels,node,original_nodes)
+            if tightened:
+                diagnostics.append({'id':node['id'],'kind':'geometry','applied':True,
+                    'before':list(node['bbox']),'after':tightened,'basis':'declared_border_extent'});node['bbox']=tightened;tightened_count+=1
             fitted=_fill(pixels,node,original_nodes)
             if fitted:
                 # Only override when the source disagrees; a declaration that
@@ -239,7 +291,7 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
         authoring['model_typography']={}
         authoring['applied_source_typography']={n['id']:{k:deepcopy(n[k]) for k in ('font','bold','color','bbox')} for n in ir['nodes'] if n['type']=='text' and any(r['id']==n['id'] and r['applied'] for r in diagnostics)}
     authoring['tool']='supervised-elements source-pixel calibration';authoring['ir_sha256']=digest(output/'slideir.json');authoring['review_notes']=ir['review_notes'];write_json(output/'authoring.json',authoring)
-    report={'schema':'ElementCalibration/1','source_sha256':ir['source_sha256'],'input_ir_sha256':digest(irfile),'output_ir_sha256':digest(output/'slideir.json'),'typography_applied':measured,'source_color_only_applied':sum(bool(r.get('source_color_applied')) for r in diagnostics),'typography_total':sum(n['type']=='text' for n in ir['nodes']),'solid_fills_applied':fills,'diagnostics':diagnostics,'human_acceptance':False}
+    report={'schema':'ElementCalibration/1','source_sha256':ir['source_sha256'],'input_ir_sha256':digest(irfile),'output_ir_sha256':digest(output/'slideir.json'),'typography_applied':measured,'source_color_only_applied':sum(bool(r.get('source_color_applied')) for r in diagnostics),'typography_total':sum(n['type']=='text' for n in ir['nodes']),'solid_fills_applied':fills,'geometry_tightened':tightened_count,'diagnostics':diagnostics,'human_acceptance':False}
     write_json(output/'calibration.json',report)
     return {k:v for k,v in report.items() if k!='diagnostics'}
 

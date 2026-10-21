@@ -1,6 +1,6 @@
 from copy import deepcopy
 import numpy as np
-from image2ppt_vision.element_calibration import _fill, _ink
+from image2ppt_vision.element_calibration import _fill, _ink, _tighten
 
 def test_fill_measurement_excludes_child_objects_and_never_mutates_pixels():
     p=np.full((100,200,3),245,np.uint8);p[30:70,50:150]=[0,90,180];before=p.copy()
@@ -43,3 +43,31 @@ def test_text_ink_refuses_white_on_white():
     """A proposal that is invisible in the source has nothing to measure."""
     p=np.full((30,80,3),255,np.uint8)
     assert _ink(p,[0,0,80,30]) is None
+
+def _banner_pixels():
+    """A bordered banner inside a box that also covers the page around it."""
+    p=np.full((120,400,3),245,np.uint8)
+    p[30:80,60:300]=[232,244,253]
+    p[30:32,60:300]=[200,216,240];p[78:80,60:300]=[200,216,240]
+    p[30:80,60:62]=[200,216,240];p[30:80,298:300]=[200,216,240]
+    return p
+
+def test_overrunning_box_is_tightened_to_its_declared_border():
+    p=_banner_pixels()
+    node={'id':'b','type':'shape','geometry':'roundRect','bbox':[0,0,400,120],
+          'fill':'e8f4fd','line':{'color':'c8d8f0','width_pt':1}}
+    box=_tighten(p,node,[node])
+    assert box is not None
+    x,y,w,h=box
+    assert abs(x-60)<=3 and abs(y-30)<=3 and abs(w-240)<=5 and abs(h-50)<=5
+
+def test_box_whose_border_is_already_at_its_edge_is_kept():
+    p=_banner_pixels()
+    node={'id':'b','type':'shape','geometry':'roundRect','bbox':[60,30,240,50],
+          'fill':'e8f4fd','line':{'color':'c8d8f0','width_pt':1}}
+    assert _tighten(p,node,[node]) is None
+
+def test_box_without_a_border_is_never_tightened():
+    p=_banner_pixels()
+    node={'id':'b','type':'shape','geometry':'rect','bbox':[0,0,400,120],'fill':'e8f4fd'}
+    assert _tighten(p,node,[node]) is None
