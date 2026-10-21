@@ -661,6 +661,37 @@
               }
             ],
             "title": "Renderer Version"
+          },
+          "typography_policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "diagnostic",
+                  "color",
+                  "typography"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Typography Policy"
+          },
+          "geometry_policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "diagnostic",
+                  "measured"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Geometry Policy"
           }
         },
         "additionalProperties": false,
