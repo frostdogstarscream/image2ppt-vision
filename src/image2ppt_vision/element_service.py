@@ -37,7 +37,7 @@ def validate_payload(plan):
                 _keys(grad, ("angle_deg", "stops"), ("angle_deg", "stops"))
                 if type(grad["angle_deg"]) not in (int, float) or not 0 <= grad["angle_deg"] <= 360:
                     raise ValueError("invalid gradient")
-                if not isinstance(grad["stops"], list) or not 2 <= len(grad["stops"]) <= 10:
+                if not isinstance(grad["stops"], list) or not 2 <= len(grad["stops"]) <= 8:
                     raise ValueError("invalid gradient stops")
                 previous = -1
                 from .supervised_elements import _color

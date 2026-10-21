@@ -6,10 +6,11 @@ measurements leave the model proposal unchanged and remain explicit in reports.
 from copy import deepcopy
 from pathlib import Path
 import math,shutil
+import cv2
 import numpy as np
 from PIL import Image
 from .storage import read_json,write_json,digest
-from .typography import estimate_text, _background
+from .typography import estimate_text, _background, _component_colors
 from .renderer_calibration import origin_correction
 from .environment import collect_environment, policy_flags
 
@@ -45,13 +46,8 @@ def _hx(v):
     return ''.join('%02X' % int(round(c)) for c in np.clip(v, 0, 255))
 
 
-def _ink(pixels, box):
-    """A text line's glyph colour, or None when no glyphs stand out.
-
-    The pixels furthest from the local median are the strokes; everything else
-    is the surface they are drawn on. Requiring real separation is what keeps a
-    white-on-white proposal from being "repaired" to noise.
-    """
+def _ink_legacy(pixels, box):
+    """Old median-based ink reading, retained as an explicit fallback switch."""
     x, y, w, h = box
     l, t = max(0, math.floor(x)), max(0, math.floor(y))
     r, b = min(pixels.shape[1], math.ceil(x + w)), min(pixels.shape[0], math.ceil(y + h))
@@ -71,16 +67,138 @@ def _ink(pixels, box):
     return {'color': _hx(flat[keep].mean(axis=0)), 'separation': round(separation, 1), 'sample_pixels': int(keep.sum())}
 
 
-def _fill(pixels,node,nodes):
-    """Fit the surface a shape paints, excluding whatever is drawn on top of it.
+def _ink_measured(pixels, box, *, text=None):
+    """Glyph colour with evidence that the selected pixels are text.
 
-    A model proposal is a claim about what the shape looks like; the source is
-    evidence. Fit a plane where the region really is one fill — flat, or a
-    gradient along one axis — and return None when the pixels support neither,
-    leaving the proposal alone.
+    The local linear surface is used as a reference even when its ``reliable``
+    flag is false: a gradient bar defeats the smooth-background assumption but
+    its glyphs are still visible, and page05 depends on measuring them. What the
+    old median-only helper lacked was evidence that the extreme pixels form
+    glyph-like components rather than a band of background texture.
     """
-    if node['geometry'] not in ('rect','roundRect','ellipse') or node['fill']=='none':return None
+    diagnostics = {'method': 'surface_delta_components', 'reason': None,
+                   'background': None, 'accepted_components': 0,
+                   'glyph_area_fraction': None, 'coverage': None}
+    x, y, w, h = box
+    if not all(math.isfinite(value) for value in (x, y, w, h)) or w < 3 or h < 3:
+        diagnostics['reason'] = 'invalid_bbox'
+        return None, diagnostics
+    pad = max(2, min(8, int(round(min(w, h) * .25))))
+    l = max(0, math.floor(x) - pad); t = max(0, math.floor(y) - pad)
+    r = min(pixels.shape[1], math.ceil(x + w) + pad)
+    b = min(pixels.shape[0], math.ceil(y + h) + pad)
+    if r - l < 3 or b - t < 3 or (r - l) * (b - t) < 64:
+        diagnostics['reason'] = 'crop_too_small'
+        return None, diagnostics
+    crop = pixels[t:b, l:r].astype(float)
+    # A tight OCR box plus padding can put neighbouring lines on the border
+    # ring, where the default 2px sample would fit their glyphs as background.
+    # Fit on colour-like pixels when enough of the crop is one surface.
+    median = np.median(crop.reshape(-1, 3), axis=0)
+    sample = np.max(np.abs(crop - median), axis=2) < 32
+    surface, background = _background(crop, sample if sample.mean() >= .25 else None)
+    diagnostics['background'] = background
+    delta = np.max(np.abs(crop - surface), axis=2)
+    threshold = max(10.0, float(background.get('border_p80_error', 0)) * 2.5 + 3.0)
+    raw = delta > threshold
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(raw.astype(np.uint8), 8)
+    x0, y0, x1, y1 = x - l, y - t, x + w - l, y + h - t
+    accepted = np.zeros_like(raw)
+    accepted_count = 0
+    saw_separator = False
+    reason = None
+    for index in range(1, count):
+        left, top, width, height, area = stats[index]
+        # A separator or a long texture band is not a glyph. Checked before the
+        # glyph-size floors, otherwise a 3px rule never reaches this branch.
+        # A glyph line can carry a rule above or below it; only the rule is
+        # skipped, and the separator reason is used when nothing else remains.
+        if ((width >= max(12, .9 * w) and height <= max(3, .08 * h)) or
+                (height >= max(12, .9 * h) and width <= max(3, .08 * w))):
+            saw_separator = True
+            continue
+        if area < 4 or width < 2 or height < max(3, .12 * h) or height > .95 * h:
+            continue
+        overlap_x = max(0, min(left + width, x1) - max(left, x0))
+        overlap_y = max(0, min(top + height, y1) - max(top, y0))
+        if overlap_x <= 0 or overlap_y <= 0:
+            continue
+        if (overlap_x * overlap_y) / float(width * height) < .35 or overlap_y / float(height) < .5:
+            continue
+        accepted[labels == index] = True
+        accepted_count += 1
+    diagnostics['accepted_components'] = accepted_count
+    if reason is None:
+        accepted_pixels = int(accepted.sum())
+        area_fraction = accepted_pixels / float(w * h)
+        diagnostics['glyph_area_fraction'] = round(area_fraction, 4)
+        if accepted_pixels < max(8, int(w * h * .005)):
+            reason = 'separator_line' if saw_separator else 'no_glyph_evidence'
+        elif area_fraction > .60:
+            reason = 'foreground_not_sparse_text'
+        else:
+            ys, xs = np.where(accepted)
+            coverage = (float(xs.max() - xs.min() + 1) / w) if len(xs) else 0.0
+            diagnostics['coverage'] = round(coverage, 4)
+            if coverage < .12:
+                reason = 'glyph_coverage_too_low'
+            elif accepted_count == 1:
+                width = int(xs.max() - xs.min() + 1); height = int(ys.max() - ys.min() + 1)
+                if not .25 <= height / float(width) <= 4 or height < .15 * h:
+                    reason = 'not_text_like'
+            else:
+                widest = max(stats[index][2] for index in range(1, count) if (labels == index)[accepted].any())
+                if widest >= .9 * w:
+                    reason = 'not_text_like'
+    if reason is not None:
+        diagnostics['reason'] = reason
+        return None, diagnostics
+    groups = _component_colors(crop, delta, accepted)
+    if not groups:
+        diagnostics['reason'] = 'foreground_color_uncertain'
+        return None, diagnostics
+    total = sum(group['weight'] for group in groups)
+    if (len(groups) > 1 and groups[1]['weight'] / float(total) >= .25 and
+            float(np.max(np.abs(groups[0]['color'] - groups[1]['color']))) > 40):
+        diagnostics['reason'] = 'mixed_colour_glyphs'
+        return None, diagnostics
+    core = accepted & (delta >= np.percentile(delta[accepted], 70))
+    if core.sum() < max(3, int(accepted.sum() * .10)):
+        diagnostics['reason'] = 'insufficient_core_pixels'
+        return None, diagnostics
+    separation = float(delta[core].mean())
+    if separation < 25:
+        diagnostics['reason'] = 'low_ink_separation'
+        return None, diagnostics
+    return {'color': _hx(groups[0]['color']), 'separation': round(separation, 1),
+            'sample_pixels': int(core.sum()), 'component_count': accepted_count,
+            'coverage': diagnostics['coverage'],
+            'glyph_area_fraction': diagnostics['glyph_area_fraction']}, diagnostics
+
+
+def _ink(pixels, box):
+    if policy_flags()['glyph_ink_evidence']:
+        return _ink_measured(pixels, box)[0]
+    return _ink_legacy(pixels, box)
+
+
+def _component_fraction(mask):
+    """Largest dominant-colour component share, used to reject speckle fills."""
+    if not mask.any():
+        return 0.0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    if count <= 1:
+        return 0.0
+    return float(stats[1:, cv2.CC_STAT_AREA].max() / mask.sum())
+
+
+def _surface_measurement(pixels, node, nodes):
+    """Collect the pixels a shape covers, excluding whatever is drawn on top."""
+    if node['geometry'] not in ('rect','roundRect','ellipse') or node['fill']=='none':
+        return None
     h,w=pixels.shape[:2];x,y,bw,bh=node['bbox'];l,t,r,b=math.floor(x),math.floor(y),math.ceil(x+bw),math.ceil(y+bh)
+    l,t,r,b=max(0,l),max(0,t),min(w,r),min(h,b)
+    if r-l<1 or b-t<1:return None
     crop=pixels[t:b,l:r];mask=np.ones(crop.shape[:2],bool)
     margin=max(2,min(5,int(min(bw,bh)*.08)))
     mask[:margin]=False;mask[-margin:]=False;mask[:,:margin]=False;mask[:,-margin:]=False
@@ -94,6 +212,18 @@ def _fill(pixels,node,nodes):
         if c>a and e>d:mask[d-t:e-t,a-l:c-l]=False
     values=crop[mask]
     if len(values)<max(30,bw*bh*.08):return None
+    yy,xx=np.mgrid[:b-t,:r-l]
+    return {'crop':crop,'mask':mask,'values':values,
+            'u':(xx[mask]/max(1,(r-l)-1)).astype(float),
+            'v':(yy[mask]/max(1,(b-t)-1)).astype(float),
+            'bbox':[l,t,r-l,b-t]}
+
+
+def _fill_measured(pixels,node,nodes):
+    """Return the fitted surface and the measurement it was fitted on."""
+    measurement=_surface_measurement(pixels,node,nodes)
+    if measurement is None:return None,None
+    crop=measurement['crop'];mask=measurement['mask'];values=measurement['values']
     declared_gradient=node.get('fill_gradient') is not None
     # Flat reading: one dominant colour filling the region.
     q=(values//16).astype(int);bins=q[:,0]*256+q[:,1]*16+q[:,2];mode=np.bincount(bins,minlength=4096).argmax();selected=bins==mode
@@ -105,15 +235,18 @@ def _fill(pixels,node,nodes):
         # more honest than a strong declaration the pixels contradict, but it is
         # only used when no plane fits.
         if near.mean()>=.55:
-            entry={'color':_hx(np.median(values[near],axis=0)),'sample_pixels':len(values),'dominant_fraction':round(float(near.mean()),4)}
+            support=np.zeros(mask.shape,bool);support[mask]=near
+            entry={'color':_hx(np.median(values[near],axis=0)),'sample_pixels':len(values),
+                   'dominant_fraction':round(float(near.mean()),4),
+                   'component_fraction':round(_component_fraction(support),4)}
             if near.mean()>=.75:flat=entry
             else:weak=entry
     if flat is not None and not declared_gradient:
-        return flat
+        return flat,measurement
     # Gradient reading: fit a plane on the masked grid, keep the stronger axis.
-    yy,xx=np.mgrid[:b-t,:r-l]
-    design=np.stack([np.ones_like(xx),xx/max(1,(r-l)-1),yy/max(1,(b-t)-1)],-1)[mask]
-    series=crop[mask].astype(float)
+    yy,xx=np.mgrid[:measurement['bbox'][3],:measurement['bbox'][2]]
+    design=np.stack([np.ones_like(xx),xx/max(1,measurement['bbox'][2]-1),yy/max(1,measurement['bbox'][3]-1)],-1)[mask]
+    series=values.astype(float)
     coef=np.linalg.lstsq(design,series,rcond=None)[0]
     for _ in range(3):
         selected=np.max(np.abs(series-design@coef),axis=1)<10
@@ -125,16 +258,166 @@ def _fill(pixels,node,nodes):
             axis=0 if np.linalg.norm(coef[1])>=np.linalg.norm(coef[2]) else 1
             if axis==0:first,last,angle=coef[0]+coef[2]*.5,coef[0]+coef[1]+coef[2]*.5,0
             else:first,last,angle=coef[0]+coef[1]*.5,coef[0]+coef[2]+coef[1]*.5,90
-            fit={'color':_hx(first),'sample_pixels':len(values),'dominant_fraction':round(float(selected.mean()),4),'angle_deg':angle}
+            # Projection is an extra approximation: measure it before claiming it.
+            axis_position=measurement['u'] if axis==0 else measurement['v']
+            projected=first+(last-first)*axis_position[:,None]
+            residual=np.max(np.abs(series-projected),axis=1)
+            projection={'mean':round(float(residual.mean()),3),
+                        'p95':round(float(np.percentile(residual,95)),3),
+                        'fraction_over_12':round(float((residual>12).mean()),4)}
+            measurement['projection']=projection
+            if (policy_flags()['fill_projection_guard'] and
+                    not (projection['mean']<=12 and projection['p95']<=24 and projection['fraction_over_12']<=.35)):
+                measurement['projection_rejected']=projection
+                # A failed projection is not evidence for the weak flat reading;
+                # only a strong flat survives as an honest fallback.
+                return flat,measurement
+            fit={'color':_hx(first),'sample_pixels':len(values),'dominant_fraction':round(float(selected.mean()),4),'angle_deg':angle,
+                 'projection':projection}
             if np.max(np.abs(first-last))>4:
                 fit['gradient']={'angle_deg':angle,'stops':[{'offset':0,'color':_hx(first)},{'offset':100000,'color':_hx(last)}]}
             elif flat is not None:
-                return flat
-            return fit
+                return flat,measurement
+            return fit,measurement
     # A declared gradient is a claim, not a constraint. When no plane fits,
     # the flat reading is the honest fallback for a bar that is nearly one
     # colour with texture the plane cannot capture.
-    return flat or weak
+    return (flat or weak),measurement
+
+
+def _fill(pixels,node,nodes):
+    """Fit the surface a shape paints, excluding whatever is drawn on top of it."""
+    return _fill_measured(pixels,node,nodes)[0]
+
+
+def _gradient_stops(gradient):
+    """Validate a declared gradient before sampling it. None means unmeasurable."""
+    if not isinstance(gradient,dict):return None
+    stops=gradient.get('stops');angle=gradient.get('angle_deg')
+    if not isinstance(stops,list) or not 2<=len(stops)<=8:return None
+    if isinstance(angle,bool) or not isinstance(angle,(int,float)) or not math.isfinite(angle):return None
+    offsets=[];colors=[]
+    for stop in stops:
+        if not isinstance(stop,dict):return None
+        offset=stop.get('offset');color=_rgb(stop.get('color'))
+        if color is None or isinstance(offset,bool) or not isinstance(offset,(int,float)) or not math.isfinite(offset):
+            return None
+        offsets.append(float(offset));colors.append(color)
+    if offsets[0]!=0 or offsets[-1]!=100000:return None
+    if any(offsets[index]>=offsets[index+1] for index in range(len(offsets)-1)):return None
+    return np.array(offsets)/100000.0,np.stack(colors),float(angle)
+
+
+def _gradient_position(u,v,angle,interpretation):
+    radians=math.radians(angle);cos,sin=math.cos(radians),math.sin(radians)
+    if interpretation=='projected':
+        span=abs(cos)+abs(sin)
+        t=.5+((u-.5)*cos+(v-.5)*sin)/max(span,1e-9)
+    else:
+        t=.5+(u-.5)*cos+(v-.5)*sin
+    return np.clip(t,0,1)
+
+
+def _paint_samples(node,u,v,*,interpretation='projected'):
+    """Evaluate a declared colour or gradient at normalised positions."""
+    gradient=node.get('fill_gradient')
+    if gradient is not None:
+        parsed=_gradient_stops(gradient)
+        if parsed is None:return None
+        offsets,colors,angle=parsed
+        t=_gradient_position(u,v,angle,interpretation)
+        painted=np.stack([np.interp(t,offsets,colors[:,channel]) for channel in range(3)],axis=1)
+        return painted,{'kind':'gradient','angle_deg':angle,'stops':int(len(offsets)),
+                        'interpretation':interpretation}
+    fill=_rgb(node.get('fill'))
+    if fill is None:return None
+    return np.tile(fill,(len(u),1)),{'kind':'solid','interpretation':None}
+
+
+def _paint_error(values,painted):
+    if values is None or painted is None:return None
+    error=np.max(np.abs(values-painted),axis=1)
+    return {'sample_pixels':int(len(error)),'mean':round(float(error.mean()),3),
+            'p95':round(float(np.percentile(error,95)),3),
+            'fraction_over_12':round(float((error>12).mean()),4)}
+
+
+def _declared_error(node,measurement):
+    """Compare the complete declaration with the source on the same pixels."""
+    gradient=node.get('fill_gradient') is not None
+    if not gradient and _rgb(node.get('fill')) is None:
+        return {'measurable':False,'reason':'declared_missing','consistent':False,
+                'all_disagree':False,'interpretations':[]}
+    interpretations=('projected','centered') if gradient else ('projected',)
+    results=[]
+    for interpretation in interpretations:
+        painted=_paint_samples(node,measurement['u'],measurement['v'],interpretation=interpretation)
+        if painted is None:
+            return {'measurable':False,'reason':'declared_unmeasurable','consistent':False,
+                    'all_disagree':False,'interpretations':[]}
+        error=_paint_error(measurement['values'],painted[0])
+        results.append({'interpretation':interpretation,'error':error,
+                        'matches':error['mean']<=12 and error['p95']<=24})
+    matches=[item['matches'] for item in results]
+    angle_verified=(not gradient or _gradient_stops(node['fill_gradient'])[2] % 90 == 0)
+    return {'measurable':True,'consistent':all(matches),'all_disagree':not any(matches),
+            'best':min(results,key=lambda item:item['error']['mean']),
+            'interpretations':results,
+            'angle_semantics':'not_applicable' if not gradient else
+                              ('axis_verified' if angle_verified else 'non_axis_assumed')}
+
+
+def _candidate_error(fitted,measurement):
+    node={'fill':fitted['color'],'fill_gradient':fitted.get('gradient')}
+    painted=_paint_samples(node,measurement['u'],measurement['v'])
+    return None if painted is None else _paint_error(measurement['values'],painted[0])
+
+
+def _fill_decision(node,fitted,measurement):
+    """Decide whether the measured surface may replace the declaration."""
+    decision={'apply':False,'decision':'candidate_not_supported','reason':None,
+              'candidate_kind':None,'declared_error':None,'candidate_error':None,
+              'legacy_drift':None,'angle_semantics':None}
+    declared=_declared_error(node,measurement)
+    decision['angle_semantics']=declared.get('angle_semantics')
+    if not declared['measurable'] and declared.get('reason')=='declared_missing':
+        decision.update(apply=True,decision='declared_missing')
+        return decision
+    if not declared['measurable']:
+        decision.update(decision='declared_unmeasurable',reason=declared.get('reason'))
+        return decision
+    decision['declared_error']=declared['best']['error']
+    if declared['consistent']:
+        decision.update(decision='declared_matches_source')
+        return decision
+    if len(declared['interpretations'])>1 and not declared['all_disagree']:
+        decision.update(decision='angle_semantics_ambiguous')
+        return decision
+    candidate=_candidate_error(fitted,measurement)
+    if candidate is None:
+        decision.update(reason='candidate_unmeasurable')
+        return decision
+    decision['candidate_error']=candidate
+    kind=('gradient' if 'gradient' in fitted else
+          'flat_strong' if fitted.get('dominant_fraction',0)>=.75 else 'flat_weak')
+    decision['candidate_kind']=kind
+    declared_color=_rgb(node.get('fill'))
+    if declared_color is not None:
+        decision['legacy_drift']=round(float(np.abs(declared_color-np.array(
+            [int(fitted['color'][index:index+2],16) for index in (0,2,4)])).mean()),3)
+    improvement=declared['best']['error']['mean']-candidate['mean']
+    if kind=='flat_weak':
+        apply=(declared['best']['error']['mean']>=40 and
+               candidate['mean']<=.75*declared['best']['error']['mean'] and
+               fitted.get('component_fraction',0)>=.7)
+        reason=None if apply else 'weak_candidate_not_coherent_with_declaration_error'
+    else:
+        apply=((candidate['mean']<=12 and candidate['p95']<=24) or
+               (candidate['mean']<=24 and candidate['mean']<=.6*declared['best']['error']['mean']))
+        apply=apply and improvement>=4
+        reason=None if apply else 'candidate_not_a_clear_improvement'
+    decision.update(apply=apply,decision='applied' if apply else 'candidate_not_supported',reason=reason)
+    return decision
 
 def _box_inside(outer,inner):
     ox,oy,ow,oh=outer;ix,iy,iw,ih=inner
@@ -266,11 +549,17 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
                         # smooth-background assumption, but it does not hide the
                         # glyphs. Measure them, and repair a proposal that
                         # contradicts them — a white title on a light bar.
-                        ink=_ink(pixels,node.get('source_text_bbox',node['bbox']))
+                        if policies['glyph_ink_evidence']:
+                            ink,ink_diagnostics=_ink_measured(pixels,node.get('source_text_bbox',node['bbox']))
+                        else:
+                            ink,ink_diagnostics=_ink_legacy(pixels,node.get('source_text_bbox',node['bbox'])),{'method':'legacy_median'}
                         declared=_rgb(node.get('color'))
                         drift=None if (ink is None or declared is None) else float(np.abs(declared-np.array([int(ink['color'][i:i+2],16) for i in (0,2,4)])).mean())
                         row['source_ink_measure']=ink
-                        if ink is not None and (declared is None or drift>30):
+                        row['source_ink_evidence']=ink_diagnostics
+                        if ink is None:
+                            row['source_color_refused_reason']=ink_diagnostics.get('reason')
+                        elif declared is None or drift>30:
                             node['color']=ink['color']
                             for run in node.get('runs',[]):run['color']=node['color']
                             row['source_color_applied']=True
@@ -285,18 +574,40 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
             if tightened:
                 diagnostics.append({'id':node['id'],'kind':'geometry','applied':True,
                     'before':list(node['bbox']),'after':tightened,'basis':'declared_border_extent'});node['bbox']=tightened;tightened_count+=1
-            fitted=_fill(pixels,node,original_nodes)
+            fitted,measurement=_fill_measured(pixels,node,original_nodes)
+            before={'fill':node.get('fill'),'fill_gradient':deepcopy(node.get('fill_gradient'))}
             if fitted:
-                # Only override when the source disagrees; a declaration that
-                # already matches its pixels is left as the model wrote it.
-                declared=_rgb(node['fill'])
-                drift=None if declared is None else float(np.abs(declared-np.array([int(fitted['color'][i:i+2],16) for i in (0,2,4)])).mean())
-                if declared is None or drift>12:
-                    diagnostics.append({'id':node['id'],'kind':'fill','applied':True,'before':node['fill'],'declared_drift':None if drift is None else round(drift,1),**fitted})
+                if policies['fill_surface']:
+                    decision=_fill_decision(node,fitted,measurement)
+                    basis='source_pixel_surface_comparison'
+                else:
+                    # Explicit rollback switch: the old start-colour comparison.
+                    declared=_rgb(node.get('fill'))
+                    drift=None if declared is None else float(np.abs(declared-np.array([int(fitted['color'][i:i+2],16) for i in (0,2,4)])).mean())
+                    apply=declared is None or drift>12
+                    decision={'apply':apply,'decision':'applied' if apply else 'declared_matches_source',
+                              'reason':None,'candidate_kind':'legacy','declared_error':None,
+                              'candidate_error':None,'legacy_drift':None if drift is None else round(drift,1),
+                              'angle_semantics':None}
+                    basis='legacy_declared_drift'
+                candidate={'color':fitted['color'],'gradient':deepcopy(fitted.get('gradient')),
+                           'dominant_fraction':fitted.get('dominant_fraction'),
+                           'component_fraction':fitted.get('component_fraction'),
+                           'sample_pixels':fitted.get('sample_pixels')}
+                row={'id':node['id'],'kind':'fill','applied':bool(decision['apply']),
+                     'basis':basis,'before':before,'candidate':candidate,
+                     'projection':measurement.get('projection'),**decision}
+                if decision['apply']:
                     node['fill']=fitted['color']
-                    if 'gradient' in fitted:node['fill_gradient']=fitted['gradient']
+                    if 'gradient' in fitted:node['fill_gradient']=deepcopy(fitted['gradient'])
                     else:node.pop('fill_gradient',None)
+                    row['after']={'fill':node.get('fill'),'fill_gradient':deepcopy(node.get('fill_gradient'))}
                     fills+=1
+                diagnostics.append(row)
+            elif measurement and measurement.get('projection_rejected'):
+                diagnostics.append({'id':node['id'],'kind':'fill','applied':False,
+                    'decision':'projection_rejected','basis':'single_axis_projection',
+                    'before':before,'projection_rejected':measurement['projection_rejected']})
     output.mkdir(parents=True);(output/'source').mkdir();(output/'assets').mkdir();shutil.copyfile(src,output/'source/page.png');ir['source_image']='source/page.png'
     for asset in ir['assets']:
         old=irfile.parent/asset['path'];relative='assets/'+asset['id']+old.suffix;shutil.copyfile(old,output/relative);asset['path']=relative

@@ -65,6 +65,8 @@ def test_http_uses_sealed_analysis_and_returns_review_required(case,monkeypatch)
     lambda r:r["element_plan"]["text_decisions"][0].update(id="unknown"),
     lambda r:r["element_plan"]["text_decisions"][0].update(runs=[{"text":"02","color":"bad"}]),
     lambda r:r["element_plan"]["objects"][0].update(fill_gradient={"angle_deg":0,"stops":[]}),
+    lambda r:r["element_plan"]["objects"][0].update(fill_gradient={"angle_deg":0,
+        "stops":[{"offset":i*12500,"color":"000000"} for i in range(9)]}),
 ])
 def test_reject_before_queue(case,mutate):
     store,_,request,_=case;mutate(request)
