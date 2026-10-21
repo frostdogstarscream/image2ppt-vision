@@ -512,7 +512,17 @@ def _hex(color):
     return "#" + "".join(f"{int(v):02X}" for v in np.clip(np.rint(color), 0, 255))
 
 
-def estimate_text(rgb, ocr, font_candidates=None, *, isolate_ocr_window=False):
+ESTIMATE_THRESHOLDS = {
+    "min_dice": .50,
+    "max_dimension_error": .25,
+    "max_unmatched_ink": .22,
+    "multicolor_min_dice": .72,
+    "multicolor_max_dimension_error": .10,
+}
+
+
+def estimate_text(rgb, ocr, font_candidates=None, *, isolate_ocr_window=False,
+                  thresholds=None):
     """Estimate one horizontal OCR line and safely remove its source ink.
 
     Input: uint8 RGB image; OCR dictionary with ``text`` and ``bbox`` (xywh).
@@ -631,11 +641,15 @@ def estimate_text(rgb, ocr, font_candidates=None, *, isolate_ocr_window=False):
     nearby = cv2.dilate((fit["predicted"] > .12).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
     unmatched = float((ink_mask & ~nearby).sum() / max(1, ink_mask.sum()))
     diag["unmatched_ink_fraction"] = round(unmatched, 4)
-    if fit["dice"] < .50 or fit["dimension_error"] > .25 or unmatched > .22:
+    thresholds = {**ESTIMATE_THRESHOLDS, **(thresholds or {})}
+    if (fit["dice"] < thresholds["min_dice"] or
+            fit["dimension_error"] > thresholds["max_dimension_error"] or
+            unmatched > thresholds["max_unmatched_ink"]):
         return refuse("font_or_ocr_shape_mismatch")
     diag["foreground_color_count"] = len(colors)
     if len(colors) > 1:
-        if len(colors) > 3 or fit["dice"] < .72 or fit["dimension_error"] > .10:
+        if (len(colors) > 3 or fit["dice"] < thresholds["multicolor_min_dice"] or
+                fit["dimension_error"] > thresholds["multicolor_max_dimension_error"]):
             return refuse("multicolor_glyph_alignment_uncertain")
         font = _font(fit["path"], fit["size"], fit["index"])
         glyph_left = fit["glyph_bbox"][0]
