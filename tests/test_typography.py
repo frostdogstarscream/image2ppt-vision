@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from image2ppt_vision.typography import estimate_text, font_status
+from image2ppt_vision.typography import _raster_fractional, estimate_text, font_status
 
 
 @pytest.fixture
@@ -56,6 +56,25 @@ def test_font_size_uses_ink_and_cleans_dark_light_gradient(candidate, bg, fg, gr
     np.testing.assert_array_equal(image, original)
     # Broad OCR padding outside actual ink is preserved exactly.
     np.testing.assert_array_equal(result["cleaned_patch"][:4], image[y:y+4, x:x+w])
+
+
+def test_size_search_reports_coarse_and_subpixel_candidates(candidate):
+    image, _, ocr, _ = render(candidate)
+    result = estimate_text(image, ocr, [candidate])
+    assert result["native_eligible"], result["diagnostics"]
+    search = result["diagnostics"]["font"]["size_search"]
+    assert search["fine_step_px"] == .25 and search["supersample"] == 4
+    assert search["fine_candidates"] >= 1
+    assert search["selected_size"] == result["font_size_px"]
+    assert isinstance(search["subpixel_effective"], bool)
+
+
+def test_fractional_raster_is_not_the_integer_bitmap(candidate):
+    base = _raster_fractional("Actual text 2026", candidate["path"], 32.0)
+    fine = _raster_fractional("Actual text 2026", candidate["path"], 32.25)
+    assert base is not None and fine is not None
+    assert (base[0].shape != fine[0].shape or
+            not np.array_equal(base[0], fine[0]))
 
 
 def test_photo_background_is_not_erased(candidate):

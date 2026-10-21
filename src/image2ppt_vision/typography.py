@@ -277,6 +277,70 @@ def _raster(text, font):
         bounds[0] + box[2], bounds[1] + box[3])
 
 
+FONT_SUPERSAMPLE = 4
+FONT_FINE_STEP = .25
+FONT_FINE_RADIUS = 1.0
+
+
+def _raster_fractional(text, path, size, index=0, supersample=FONT_SUPERSAMPLE):
+    """Rasterise a fractional font size by rendering large and downsampling.
+
+    PIL/FreeType rounds its integer pixel size, so asking for 14.25px otherwise
+    returns the same bitmap as 14px. Rendering at 4x and resampling preserves
+    the sub-pixel difference that the coarse integer search cannot see.
+    """
+    high = _raster(text, _font(path, max(1, int(round(size * supersample))), index))
+    if high is None:
+        return None
+    pixels, glyph_box = high
+    height, width = pixels.shape
+    target = (max(1, int(round(width / supersample))),
+              max(1, int(round(height / supersample))))
+    image = Image.fromarray(pixels).resize(target, Image.Resampling.LANCZOS)
+    array = np.asarray(image)
+    yy, xx = np.where(array > 12)
+    if not len(xx):
+        return None
+    box = (int(xx.min()), int(yy.min()), int(xx.max()) + 1, int(yy.max()) + 1)
+    scaled = (round(glyph_box[0] / supersample + box[0], 3),
+              round(glyph_box[1] / supersample + box[1], 3),
+              round(glyph_box[2] / supersample + box[0], 3),
+              round(glyph_box[3] / supersample + box[1], 3))
+    return array[box[1]:box[3], box[0]:box[2]], scaled
+
+
+def _score_font(text, candidate, size, ink, observed, soft_observed, *,
+                fractional=False):
+    """Score one font/size candidate against the observed ink mask."""
+    h, w = ink.shape
+    raster = (_raster_fractional(text, candidate["path"], size, candidate["index"])
+              if fractional else _raster(text, _font(candidate["path"], size, candidate["index"])))
+    if raster is None:
+        return None
+    pixels, glyph_box = raster
+    rh, rw = pixels.shape
+    dim_error = abs(rw - w) / max(w, 1) + abs(rh - h) / max(h, 1)
+    if dim_error > .6:
+        return None
+    pixels = pixels.astype(np.float32) / 255
+    best = None
+    for dx in {0, int(round((w-rw)/2)), w-rw}:
+        for dy in {0, int(round((h-rh)/2)), h-rh}:
+            predicted = _place(pixels, (h, w), dx, dy)
+            soft = cv2.GaussianBlur(predicted, (3, 3), .55)
+            dice = float(2 * np.minimum(soft, soft_observed).sum() /
+                         max(soft.sum() + soft_observed.sum(), .001))
+            mass_error = abs(float(np.log(max(soft.sum(), .001) / max(soft_observed.sum(), .001))))
+            loss = 1 - dice + .28 * dim_error + .16 * mass_error
+            if best is None or loss < best[0]:
+                best = (loss, dice, dx, dy, predicted)
+    return {**candidate, "size": size, "loss": best[0], "dice": best[1],
+            "dx": best[2], "dy": best[3], "predicted": best[4],
+            "glyph_bbox": glyph_box, "dimension_error": dim_error,
+            "ink_mass_ratio": float(best[4].sum()/max(observed.sum(), .001)),
+            "fine": fractional}
+
+
 def _background(crop, sample_mask=None):
     """Fit a plane using robust border samples, retaining a measured uncertainty."""
     h, w = crop.shape[:2]
@@ -327,7 +391,13 @@ def _place(mask, shape, dx, dy):
 
 
 def _fit_font(text, ink, candidates):
-    """Use shape overlap as well as width/height; never stretch a candidate."""
+    """Use shape overlap as well as width/height; never stretch a candidate.
+
+    The integer search brackets the size; the winning family is then refined on
+    a 0.25px grid at 4x supersampling. If the fine rasters are identical, the
+    report says so and the coarse integer candidate is kept rather than
+    pretending a sub-pixel measurement happened.
+    """
     h, w = ink.shape
     observed = ink.astype(np.float32)
     # Antialiasing from a screenshot is not identical to the local rasterizer.
@@ -349,36 +419,52 @@ def _fit_font(text, ink, candidates):
         for size in sizes:
             if size > 256:
                 continue
-            raster = _raster(text, _font(c["path"], size, c["index"]))
-            if raster is None:
-                continue
-            pixels, glyph_box = raster
-            rh, rw = pixels.shape
-            dim_error = abs(rw - w) / max(w, 1) + abs(rh - h) / max(h, 1)
-            if dim_error > .6:
-                continue
-            pixels = pixels.astype(np.float32) / 255
-            best = None
-            for dx in {0, int(round((w-rw)/2)), w-rw}:
-                for dy in {0, int(round((h-rh)/2)), h-rh}:
-                    predicted = _place(pixels, (h, w), dx, dy)
-                    soft = cv2.GaussianBlur(predicted, (3, 3), .55)
-                    dice = float(2 * np.minimum(soft, soft_observed).sum() /
-                                 max(soft.sum() + soft_observed.sum(), .001))
-                    mass_error = abs(float(np.log(max(soft.sum(), .001) / max(soft_observed.sum(), .001))))
-                    loss = 1 - dice + .28 * dim_error + .16 * mass_error
-                    if best is None or loss < best[0]:
-                        best = (loss, dice, dx, dy, predicted)
-            fits.append({**c, "size": size, "loss": best[0], "dice": best[1],
-                         "dx": best[2], "dy": best[3], "predicted": best[4],
-                         "glyph_bbox": glyph_box, "dimension_error": dim_error,
-                         "ink_mass_ratio": float(best[4].sum()/max(observed.sum(), .001))})
+            fit = _score_font(text, c, size, ink, observed, soft_observed)
+            if fit is not None:
+                fits.append(fit)
     if not fits:
         return None
     fits.sort(key=lambda f: (f["loss"], f["path"], f["size"]))
+    coarse_best = fits[0]
+    coarse_size = coarse_best["size"]
+    fine_sizes = []
+    seen = set()
+    pointer = -FONT_FINE_RADIUS
+    while pointer <= FONT_FINE_RADIUS + 1e-9:
+        size = round(coarse_size + pointer, 2)
+        pointer = round(pointer + FONT_FINE_STEP, 2)
+        if size < 5 or size > 256 or size in seen or float(size).is_integer():
+            continue
+        seen.add(size)
+        fine_candidate = {key: coarse_best[key] for key in
+                          ("path", "family", "bold", "index", "sha256") if key in coarse_best}
+        fit = _score_font(text, fine_candidate, size, ink, observed, soft_observed,
+                          fractional=True)
+        if fit is not None:
+            fits.append(fit)
+            fine_sizes.append(fit)
+    distinct = len({hashlib.sha1(np.round(fit["predicted"] * 255).astype(np.uint8).tobytes()).hexdigest()
+                    for fit in fine_sizes})
+    subpixel_effective = distinct > 1
+    fits.sort(key=lambda f: (f["loss"], f["path"], f["size"]))
     best = fits[0]
+    if not subpixel_effective:
+        # Identical rasters mean the fine grid adds no evidence; be honest and
+        # keep the coarse integer result.
+        best = coarse_best
     different_family = next((f for f in fits if f["family"] != best["family"]), None)
     best["family_margin"] = (different_family["loss"] - best["loss"]) if different_family else None
+    best["size_search"] = {
+        "coarse_size": coarse_size,
+        "fine_step_px": FONT_FINE_STEP,
+        "fine_radius_px": FONT_FINE_RADIUS,
+        "supersample": FONT_SUPERSAMPLE,
+        "fine_candidates": len(fine_sizes),
+        "distinct_rasters": distinct,
+        "subpixel_effective": subpixel_effective,
+        "selected_size": best["size"],
+        "refined": bool(best.get("fine")),
+    }
     return best
 
 
@@ -538,6 +624,7 @@ def estimate_text(rgb, ocr, font_candidates=None, *, isolate_ocr_window=False):
                     "family_margin": None if fit["family_margin"] is None else round(fit["family_margin"], 4),
                     "glyph_bbox": list(fit["glyph_bbox"]),
                     "font_path": fit["path"],
+                    "size_search": fit.get("size_search"),
                     "render_origin": [x0+ix0+fit["dx"]-fit["glyph_bbox"][0],
                                       y0+iy0+fit["dy"]-fit["glyph_bbox"][1]]}
     # Unmatched ink can be a chart line, picture, wrong OCR, or missing glyph.
