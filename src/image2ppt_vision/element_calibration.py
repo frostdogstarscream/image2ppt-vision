@@ -1,4 +1,4 @@
-"""Measure model-proposed typography and simple fills from the original pixels.
+"""Measure model-proposed typography, fills and text ink from the original pixels.
 
 This is source-only calibration, not semantic correction or acceptance. Refused
 measurements leave the model proposal unchanged and remain explicit in reports.
@@ -29,7 +29,55 @@ def _source_contrast(pixels,node):
     return {'minimum_rgb_distance':round(min(distances),3),'low_contrast_risk':min(distances)<18,
             'basis':'source_background_estimate_not_actual_pptx_render'}
 
+def _rgb(value):
+    if isinstance(value, str):
+        v = value.lstrip("#")
+        if len(v) == 6:
+            try:
+                return np.array([int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)], float)
+            except ValueError:
+                return None
+    return None
+
+
+def _hx(v):
+    return ''.join('%02X' % int(round(c)) for c in np.clip(v, 0, 255))
+
+
+def _ink(pixels, box):
+    """A text line's glyph colour, or None when no glyphs stand out.
+
+    The pixels furthest from the local median are the strokes; everything else
+    is the surface they are drawn on. Requiring real separation is what keeps a
+    white-on-white proposal from being "repaired" to noise.
+    """
+    x, y, w, h = box
+    l, t = max(0, math.floor(x)), max(0, math.floor(y))
+    r, b = min(pixels.shape[1], math.ceil(x + w)), min(pixels.shape[0], math.ceil(y + h))
+    if min(r - l, b - t) < 4:
+        return None
+    flat = pixels[t:b, l:r].reshape(-1, 3).astype(float)
+    if flat.shape[0] < 40:
+        return None
+    background = np.median(flat, axis=0)
+    distance = np.linalg.norm(flat - background, axis=1)
+    keep = distance >= np.percentile(distance, 92)
+    if keep.sum() < 20:
+        return None
+    separation = float(distance[keep].mean())
+    if separation < 25:
+        return None
+    return {'color': _hx(flat[keep].mean(axis=0)), 'separation': round(separation, 1), 'sample_pixels': int(keep.sum())}
+
+
 def _fill(pixels,node,nodes):
+    """Fit the surface a shape paints, excluding whatever is drawn on top of it.
+
+    A model proposal is a claim about what the shape looks like; the source is
+    evidence. Fit a plane where the region really is one fill — flat, or a
+    gradient along one axis — and return None when the pixels support neither,
+    leaving the proposal alone.
+    """
     if node['geometry'] not in ('rect','roundRect','ellipse') or node['fill']=='none':return None
     h,w=pixels.shape[:2];x,y,bw,bh=node['bbox'];l,t,r,b=math.floor(x),math.floor(y),math.ceil(x+bw),math.ceil(y+bh)
     crop=pixels[t:b,l:r];mask=np.ones(crop.shape[:2],bool)
@@ -45,11 +93,47 @@ def _fill(pixels,node,nodes):
         if c>a and e>d:mask[d-t:e-t,a-l:c-l]=False
     values=crop[mask]
     if len(values)<max(30,bw*bh*.08):return None
+    declared_gradient=node.get('fill_gradient') is not None
+    # Flat reading: one dominant colour filling the region.
     q=(values//16).astype(int);bins=q[:,0]*256+q[:,1]*16+q[:,2];mode=np.bincount(bins,minlength=4096).argmax();selected=bins==mode
-    if selected.mean()<.55:return None
-    color=np.median(values[selected],axis=0);near=np.max(abs(values.astype(float)-color),axis=1)<12
-    if near.mean()<.75:return None
-    return {'color':''.join(f'{round(v):02X}' for v in np.median(values[near],axis=0)), 'sample_pixels':len(values),'dominant_fraction':round(float(near.mean()),4)}
+    flat=None;weak=None
+    if selected.mean()>=.55:
+        color=np.median(values[selected],axis=0);near=np.max(abs(values.astype(float)-color),axis=1)<12
+        # A bar with a soft gradient or a border keeps one colour dominant over
+        # most of its area without filling 75% of a tight band. That is still
+        # more honest than a strong declaration the pixels contradict, but it is
+        # only used when no plane fits.
+        if near.mean()>=.55:
+            entry={'color':_hx(np.median(values[near],axis=0)),'sample_pixels':len(values),'dominant_fraction':round(float(near.mean()),4)}
+            if near.mean()>=.75:flat=entry
+            else:weak=entry
+    if flat is not None and not declared_gradient:
+        return flat
+    # Gradient reading: fit a plane on the masked grid, keep the stronger axis.
+    yy,xx=np.mgrid[:b-t,:r-l]
+    design=np.stack([np.ones_like(xx),xx/max(1,(r-l)-1),yy/max(1,(b-t)-1)],-1)[mask]
+    series=crop[mask].astype(float)
+    coef=np.linalg.lstsq(design,series,rcond=None)[0]
+    for _ in range(3):
+        selected=np.max(np.abs(series-design@coef),axis=1)<10
+        if selected.sum()<len(series)*.2:break
+        coef=np.linalg.lstsq(design[selected],series[selected],rcond=None)[0]
+    else:
+        error=np.max(np.abs(series-design@coef),axis=1)
+        if np.percentile(error,95)<=24:
+            axis=0 if np.linalg.norm(coef[1])>=np.linalg.norm(coef[2]) else 1
+            if axis==0:first,last,angle=coef[0]+coef[2]*.5,coef[0]+coef[1]+coef[2]*.5,0
+            else:first,last,angle=coef[0]+coef[1]*.5,coef[0]+coef[2]+coef[1]*.5,90
+            fit={'color':_hx(first),'sample_pixels':len(values),'dominant_fraction':round(float(selected.mean()),4),'angle_deg':angle}
+            if np.max(np.abs(first-last))>4:
+                fit['gradient']={'angle_deg':angle,'stops':[{'offset':0,'color':_hx(first)},{'offset':100000,'color':_hx(last)}]}
+            elif flat is not None:
+                return flat
+            return fit
+    # A declared gradient is a claim, not a constraint. When no plane fits,
+    # the flat reading is the honest fallback for a bar that is nearly one
+    # colour with texture the plane cannot capture.
+    return flat or weak
 
 def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=None,calibrate_fills=True):
     irfile=Path(irfile);output=Path(output)
@@ -112,6 +196,22 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
                         node['color']=estimate['color'].lstrip('#')
                         for run in node.get('runs',[]):run['color']=node['color']
                         row['source_color_applied']=True
+                        row['source_color_basis']='typography_estimate'
+                    elif row['reason'] in ('font_or_ocr_shape_mismatch','strict_source_font_fit_refused','no_usable_installed_font','non_smooth_or_crossing_background'):
+                        # A gradient panel defeats the typography estimate's
+                        # smooth-background assumption, but it does not hide the
+                        # glyphs. Measure them, and repair a proposal that
+                        # contradicts them — a white title on a light bar.
+                        ink=_ink(pixels,node.get('source_text_bbox',node['bbox']))
+                        declared=_rgb(node.get('color'))
+                        drift=None if (ink is None or declared is None) else float(np.abs(declared-np.array([int(ink['color'][i:i+2],16) for i in (0,2,4)])).mean())
+                        row['source_ink_measure']=ink
+                        if ink is not None and (declared is None or drift>30):
+                            node['color']=ink['color']
+                            for run in node.get('runs',[]):run['color']=node['color']
+                            row['source_color_applied']=True
+                            row['source_color_basis']='glyph_ink'
+                            row['declared_color_drift']=None if drift is None else round(drift,1)
                 row['needs_rendered_review']=True
                 row['output_contrast']=_source_contrast(pixels,node)
                 row['output']={k:deepcopy(node.get(k)) for k in ('bbox','font','bold','color','runs')}
@@ -119,7 +219,16 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
         elif node['type']=='shape' and calibrate_fills:
             fitted=_fill(pixels,node,original_nodes)
             if fitted:
-                diagnostics.append({'id':node['id'],'kind':'fill','applied':True,'before':node['fill'],**fitted});node['fill']=fitted['color'];node.pop('fill_gradient',None);fills+=1
+                # Only override when the source disagrees; a declaration that
+                # already matches its pixels is left as the model wrote it.
+                declared=_rgb(node['fill'])
+                drift=None if declared is None else float(np.abs(declared-np.array([int(fitted['color'][i:i+2],16) for i in (0,2,4)])).mean())
+                if declared is None or drift>12:
+                    diagnostics.append({'id':node['id'],'kind':'fill','applied':True,'before':node['fill'],'declared_drift':None if drift is None else round(drift,1),**fitted})
+                    node['fill']=fitted['color']
+                    if 'gradient' in fitted:node['fill_gradient']=fitted['gradient']
+                    else:node.pop('fill_gradient',None)
+                    fills+=1
     output.mkdir(parents=True);(output/'source').mkdir();(output/'assets').mkdir();shutil.copyfile(src,output/'source/page.png');ir['source_image']='source/page.png'
     for asset in ir['assets']:
         old=irfile.parent/asset['path'];relative='assets/'+asset['id']+old.suffix;shutil.copyfile(old,output/relative);asset['path']=relative
