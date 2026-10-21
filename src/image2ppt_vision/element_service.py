@@ -121,10 +121,13 @@ def reconstruct(store, request, output):
                          model_id="external-element-plan",
                          response_sha256=digest(output/"submitted-plan.json"))
     from .element_calibration import calibrate_elements
+    # Fills were disabled here while the measurement only accepted a uniform
+    # dominant colour and flattened declared gradients; it now fits a plane,
+    # reports drift, and leaves a declaration that matches its pixels alone.
     calibration = calibrate_elements(output/"proposal/slideir.json", output/"calibrated",
                                     source_typography=True,
                                     renderer_version=request.renderer_version,
-                                    calibrate_fills=False)
+                                    calibrate_fills=True)
     details = read_json(output/"calibrated/calibration.json")
     rows = details["diagnostics"]
     issues = []
