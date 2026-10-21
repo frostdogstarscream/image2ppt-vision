@@ -273,6 +273,39 @@ def test_ink_accepts_dark_glyphs_on_light_gradient_bar():
     assert ink is not None and int(ink["color"][:2], 16) < 60
 
 
+def _multi_stop_pixels(stops, width=400, height=60):
+    pixels = np.empty((height, width, 3), np.uint8)
+    offsets = np.array([stop[0] for stop in stops], float)
+    colours = np.stack([stop[1] for stop in stops]).astype(float)
+    t = np.linspace(0, 1, width)
+    for channel in range(3):
+        pixels[:, :, channel] = np.interp(t, offsets, colours[:, channel])
+    return pixels
+
+
+def test_multi_stop_gradient_fits_when_two_stops_cannot():
+    pixels = _multi_stop_pixels([(0, (220, 40, 40)), (.35, (40, 180, 90)),
+                                 (1, (40, 70, 200))])
+    node = {"id": "g", "type": "shape", "geometry": "rect",
+            "bbox": [0, 0, 400, 60], "fill": "000000"}
+    fitted, measurement = _fill_measured(pixels, node, [node])
+    assert fitted is not None and "gradient" in fitted
+    assert fitted["stop_count"] >= 3
+    stops = fitted["gradient"]["stops"]
+    assert len(stops) == fitted["stop_count"] and 3 <= len(stops) <= 8
+    assert stops[0]["offset"] == 0 and stops[-1]["offset"] == 100000
+    assert all(left["offset"] < right["offset"] for left, right in zip(stops, stops[1:]))
+    assert measurement["projection"]["mean"] <= 12
+
+
+def test_two_stop_gradient_stays_two_stops():
+    pixels = _multi_stop_pixels([(0, (240, 240, 240)), (1, (80, 80, 80))])
+    node = {"id": "g", "type": "shape", "geometry": "rect",
+            "bbox": [0, 0, 400, 60], "fill": "000000"}
+    fitted, _ = _fill_measured(pixels, node, [node])
+    assert fitted["stop_count"] == 2 and len(fitted["gradient"]["stops"]) == 2
+
+
 def _write_ir(tmp_path, pixels, nodes):
     proposal = tmp_path / "proposal"
     (proposal / "source").mkdir(parents=True)

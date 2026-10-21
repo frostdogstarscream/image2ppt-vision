@@ -110,7 +110,8 @@ def test_invalid_font_manifest_degrades_without_failing_calibration(tmp_path, mo
     assert report["environment"]["status"] == "degraded"
     assert "typography" in report["environment"]["degraded_features"]
     assert set(report["policies"]) == {"fill_surface", "fill_projection_guard",
-                                       "glyph_ink_evidence", "environment_inventory"}
+                                       "glyph_ink_evidence", "multi_stop_gradient",
+                                       "environment_inventory"}
     calibrated = json.loads((output / "slideir.json").read_text(encoding="utf-8"))
     shape = next(node for node in calibrated["nodes"] if node["id"] == "s1")
     assert shape["fill"] != "112233"

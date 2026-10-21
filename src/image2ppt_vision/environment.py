@@ -23,6 +23,7 @@ POLICY_VARIABLES = {
     "fill_surface": "VISION_FILL_SURFACE",
     "fill_projection_guard": "VISION_FILL_PROJECTION_GUARD",
     "glyph_ink_evidence": "VISION_GLYPH_INK_EVIDENCE",
+    "multi_stop_gradient": "VISION_MULTI_STOP_GRADIENT",
     "environment_inventory": "VISION_ENVIRONMENT_INVENTORY",
 }
 

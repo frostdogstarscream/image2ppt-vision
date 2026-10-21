@@ -253,9 +253,9 @@ def _fill_measured(pixels,node,nodes):
         selected=np.max(np.abs(series-design@coef),axis=1)<10
         if selected.sum()<len(series)*.2:break
         coef=np.linalg.lstsq(design[selected],series[selected],rcond=None)[0]
-    else:
-        error=np.max(np.abs(series-design@coef),axis=1)
-        if np.percentile(error,95)<=24:
+    if np.isfinite(coef).all():
+            # A two-stop plane may be a poor fit on a piecewise ramp; the
+            # multi-stop branch below gets a chance before the projection guard.
             axis=0 if np.linalg.norm(coef[1])>=np.linalg.norm(coef[2]) else 1
             if axis==0:first,last,angle=coef[0]+coef[2]*.5,coef[0]+coef[1]+coef[2]*.5,0
             else:first,last,angle=coef[0]+coef[1]*.5,coef[0]+coef[2]+coef[1]*.5,90
@@ -266,15 +266,29 @@ def _fill_measured(pixels,node,nodes):
             projection={'mean':round(float(residual.mean()),3),
                         'p95':round(float(np.percentile(residual,95)),3),
                         'fraction_over_12':round(float((residual>12).mean()),4)}
+            two_stop_ok=(projection['mean']<=12 and projection['p95']<=24 and
+                         projection['fraction_over_12']<=.35)
+            if not two_stop_ok and policy_flags()['multi_stop_gradient']:
+                multi=_multi_stop_fit(axis_position,series)
+                if multi is not None:
+                    knots,colors,projection=multi
+                    stops=[{'offset':round(float(knot)*100000),'color':_hx(color)}
+                           for knot,color in zip(knots,colors)]
+                    measurement['projection']=projection
+                    fit={'color':_hx(colors[0]),'sample_pixels':len(values),
+                         'dominant_fraction':round(float(selected.mean()),4),
+                         'angle_deg':angle,'projection':projection,
+                         'stop_count':len(stops),
+                         'gradient':{'angle_deg':angle,'stops':stops}}
+                    return fit,measurement
             measurement['projection']=projection
-            if (policy_flags()['fill_projection_guard'] and
-                    not (projection['mean']<=12 and projection['p95']<=24 and projection['fraction_over_12']<=.35)):
+            if (policy_flags()['fill_projection_guard'] and not two_stop_ok):
                 measurement['projection_rejected']=projection
                 # A failed projection is not evidence for the weak flat reading;
                 # only a strong flat survives as an honest fallback.
                 return flat,measurement
             fit={'color':_hx(first),'sample_pixels':len(values),'dominant_fraction':round(float(selected.mean()),4),'angle_deg':angle,
-                 'projection':projection}
+                 'projection':projection,'stop_count':2}
             if np.max(np.abs(first-last))>4:
                 fit['gradient']={'angle_deg':angle,'stops':[{'offset':0,'color':_hx(first)},{'offset':100000,'color':_hx(last)}]}
             elif flat is not None:
@@ -341,6 +355,33 @@ def _paint_error(values,painted):
     return {'sample_pixels':int(len(error)),'mean':round(float(error.mean()),3),
             'p95':round(float(np.percentile(error,95)),3),
             'fraction_over_12':round(float((error>12).mean()),4)}
+
+
+def _multi_stop_fit(axis_position,series,max_stops=6):
+    """Fit a piecewise-linear ramp when a two-stop projection is insufficient."""
+    t=np.asarray(axis_position,float);s=np.asarray(series,float)
+    order=np.argsort(t);t=t[order];s=s[order]
+    for count in range(3,max_stops+1):
+        knots=np.linspace(0,1,count);half=.5/(count-1);colors=[]
+        minimum=max(8,len(t)//(count*4))
+        for knot in knots:
+            mask=(t>=knot-half-1e-9)&(t<=knot+half+1e-9)
+            if mask.sum()<minimum:
+                mask=np.abs(t-knot)<=max(.02,1.5/len(t))
+            if mask.sum()<1:break
+            colors.append(np.median(s[mask],axis=0))
+        if len(colors)!=count:continue
+        colors=np.stack(colors)
+        if float(np.max(np.ptp(colors,axis=0)))<=4:continue
+        predicted=np.stack([np.interp(axis_position,knots,colors[:,channel]) for channel in range(3)],axis=1)
+        residual=np.max(np.abs(series-predicted),axis=1)
+        projection={'mean':round(float(residual.mean()),3),
+                    'p95':round(float(np.percentile(residual,95)),3),
+                    'fraction_over_12':round(float((residual>12).mean()),4),
+                    'stops':count}
+        if projection['mean']<=12 and projection['p95']<=24 and projection['fraction_over_12']<=.35:
+            return knots,colors,projection
+    return None
 
 
 def _declared_error(node,measurement):
