@@ -455,11 +455,11 @@ def _fit_font(text, ink, candidates):
     best = coarse_best
     if subpixel_effective and best_fine is not None:
         dimension_gain = coarse_best["dimension_error"] - best_fine["dimension_error"]
-        loss_gain = coarse_best["loss"] - best_fine["loss"]
         # A refined size must improve the physical size measurement, not just
-        # shape overlap. Tiny changes stay on the coarse grid.
+        # shape overlap. Tiny or overlap-only gains stay on the coarse grid
+        # until the rendered closed loop can verify them.
         if (best_fine["dimension_error"] <= coarse_best["dimension_error"] + 1e-9 and
-                (dimension_gain >= .03 or loss_gain >= .05)):
+                dimension_gain >= .03):
             best = best_fine
     different_family = next((f for f in fits if f["family"] != best["family"]), None)
     best["family_margin"] = (different_family["loss"] - best["loss"]) if different_family else None
