@@ -140,12 +140,16 @@ def reconstruct(store, request, output):
         elif not row["renderer_origin_calibration"]["applied"]:
             issues.append({"id":row["id"], "code":"renderer_origin_unverified",
                            "reason":row["renderer_origin_calibration"]["reason"]})
+    from .environment import compact_environment
+    environment = compact_environment(details.get("environment") or {"status":"unknown"})
     quality = {"schema":"ElementServiceQuality/1", "status":"REVIEW_REQUIRED",
                "source_sha256":inventory["source_sha256"], "analysis_job_id":request.analysis_job_id,
                "renderer_version":request.renderer_version, "issues":issues,
                "typography_applied":calibration["typography_applied"],
                "source_color_only_applied":calibration["source_color_only_applied"],
                "typography_total":calibration["typography_total"],
+               "environment":environment,
+               "degraded_features":environment.get("degraded_features", []),
                "pptx_compiled":False, "actual_render_verified":False, "human_acceptance":False}
     write_json(output/"quality.json", quality)
     return {"status":"REVIEW_REQUIRED", "slideir":"reconstruction/calibrated/slideir.json",

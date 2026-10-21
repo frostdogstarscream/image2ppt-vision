@@ -107,8 +107,26 @@ def _verify_manifest(manifest_digest, records):
     return tuple(candidates)
 
 
+def _font_environment_reason(error):
+    text = str(error).lower()
+    if "sha256" in text:
+        return "font_hash_mismatch"
+    if "json" in text or "manifest" in text:
+        return "invalid_manifest"
+    if "load" in text:
+        return "font_unloadable"
+    if "missing" in text or "unreadable" in text:
+        return "font_asset_unavailable"
+    return "font_environment_error"
+
+
 def font_status():
-    """Sanitized deployment status: no private manifest or font-file paths."""
+    """Sanitized deployment status: no private manifest or font-file paths.
+
+    Kept strict on purpose: callers that require fonts must see a broken
+    manifest as an error rather than silently borrowing another family. The
+    environment probe uses ``font_status_or_degraded`` instead.
+    """
     candidates = _candidates(None)
     configured = "VISION_FONT_MANIFEST" in os.environ
     return {"source": "configured_manifest" if configured else "installed_fonts",
@@ -116,6 +134,73 @@ def font_status():
             "families": sorted({item["family"] for item in candidates}),
             "hash_verification": "passed" if configured else "not_requested",
             "sha256_verified": configured}
+
+
+def font_status_or_degraded():
+    """Environment-safe font status: a broken volume becomes degraded, not fatal."""
+    configured = os.environ.get("VISION_FONT_MANIFEST")
+    status = {"source": "configured_manifest" if configured is not None else "installed_fonts",
+              "status": "ready", "reason": None, "font_count": 0, "families": [],
+              "hash_verification": "not_requested", "sha256_verified": False,
+              "manifest_sha256": None}
+    if configured is not None:
+        try:
+            status["manifest_sha256"] = hashlib.sha256(
+                Path(configured).expanduser().resolve().read_bytes()).hexdigest()
+        except (OSError, RuntimeError, ValueError):
+            status["manifest_sha256"] = None
+    try:
+        candidates = _candidates(None)
+    except (OSError, ValueError) as error:
+        status.update(status="degraded", reason=_font_environment_reason(error))
+        return status
+    status.update(font_count=len(candidates),
+                  families=sorted({item["family"] for item in candidates}),
+                  hash_verification="passed" if configured is not None else "not_requested",
+                  sha256_verified=configured is not None)
+    if not candidates:
+        status.update(status="degraded", reason="no_font_candidates")
+    return status
+
+
+def glyph_coverage(texts, candidates=None):
+    """Which characters the available fonts can actually draw.
+
+    Coverage is reported per font because the fitted family is only known after
+    measuring a line; a page is covered when at least one candidate draws every
+    required character. Missing lists are truncated and never include paths.
+    """
+    characters = sorted({character for text in texts if isinstance(text, str)
+                         for character in text if not character.isspace()})
+    result = {"status": "ready", "reason": None, "required_characters": len(characters),
+              "complete": True, "fonts": []}
+    if not characters:
+        return result
+    try:
+        items = _candidates(candidates)
+    except (OSError, ValueError) as error:
+        result.update(status="degraded", reason=_font_environment_reason(error), complete=False)
+        return result
+    fonts = []
+    for item in items:
+        missing = []
+        for character in characters:
+            try:
+                present = _has_glyph(item["path"], item.get("index", 0), character)
+            except (OSError, ValueError):
+                present = False
+            if not present:
+                missing.append(character)
+        fonts.append({"family": item["family"], "bold": item.get("bold", False),
+                      "coverage": round(1 - len(missing) / len(characters), 4),
+                      "missing_count": len(missing),
+                      "missing_characters": missing[:50],
+                      "complete": not missing})
+    complete = any(font["complete"] for font in fonts)
+    result.update(status="ready" if complete else "degraded",
+                  reason=None if complete else "glyph_coverage_incomplete",
+                  complete=complete, fonts=fonts)
+    return result
 
 
 def _candidates(candidates):

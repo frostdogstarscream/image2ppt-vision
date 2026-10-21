@@ -103,3 +103,36 @@ def origin_correction(estimate, source_size, target_size, *, renderer_version=No
     result.update(dy=round(float(curve["dy_intercept"]+curve["dy_slope"]*size), 6),
                   applied=True, reason="matched_measured_profile")
     return result
+
+
+def profile_status(renderer_version=None, source_size=None, target_size=None):
+    """Report whether the bundled origin profile applies, without estimating text.
+
+    This is evidence for environment reports only. It never relaxes the gate in
+    ``origin_correction``; a version or canvas mismatch stays uncalibrated.
+    """
+    version = renderer_version if renderer_version is not None else os.environ.get(
+        "VISION_ARTIFACT_VERSION", FIXED_ARTIFACT_VERSION)
+    result = {"requested_version": version, "profile_version": None,
+              "source_canvas": None, "target_canvas": None,
+              "status": "unknown", "reason": "uncalibrated_profile_unavailable"}
+    try:
+        profile = _profile()
+        result.update(profile_version=profile["artifact_tool_version"],
+                      source_canvas=list(profile["source_canvas"]),
+                      target_canvas=list(profile["target_canvas"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return result
+    if version != result["profile_version"]:
+        result.update(status="degraded", reason="uncalibrated_renderer_version")
+    elif (source_size is not None and
+          (not isinstance(source_size, (list, tuple)) or
+           list(source_size) != result["source_canvas"])):
+        result.update(status="degraded", reason="uncalibrated_canvas")
+    elif (target_size is not None and
+          (not isinstance(target_size, (list, tuple)) or
+           list(target_size) != result["target_canvas"])):
+        result.update(status="degraded", reason="uncalibrated_canvas")
+    else:
+        result.update(status="ready", reason="matched_measured_profile")
+    return result

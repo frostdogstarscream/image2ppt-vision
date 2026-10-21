@@ -29,9 +29,8 @@ def capabilities():
               "network_inference": False, "models": None,
               "model_plan_provider": {"available": True, "automatic": False, "invocation": "explicit_cli_plan",
                   "configured": all(bool(os.environ.get(k)) for k in ("VISION_LLM_BASE_URL","VISION_LLM_MODEL","VISION_LLM_API_KEY"))}}
-    from .typography import font_status
-    try:result['fonts']=font_status()
-    except ValueError:result['fonts']={'status':'INVALID_MANIFEST'}
+    from .typography import font_status_or_degraded
+    result['fonts']=font_status_or_degraded()
     try:
         m = verified_models()
         result["models"] = m

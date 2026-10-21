@@ -11,6 +11,7 @@ from PIL import Image
 from .storage import read_json,write_json,digest
 from .typography import estimate_text, _background
 from .renderer_calibration import origin_correction
+from .environment import collect_environment, policy_flags
 
 def _contains(a,b):
     return a[0]<=b[0] and a[1]<=b[1] and a[0]+a[2]>=b[0]+b[2] and a[1]+a[3]>=b[1]+b[3]
@@ -195,10 +196,25 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
     w,h=ir['canvas']['source_px'];tw,th=ir['canvas']['target_px'];scale=tw/w
     diagnostics=[];measured=0;fills=0;tightened_count=0
     original_nodes=deepcopy(ir['nodes'])
+    policies=policy_flags()
+    try:
+        environment=collect_environment(ir,renderer_version=renderer_version,
+                                        texts=[node['text'] for node in ir['nodes'] if node['type']=='text'])
+    except Exception:
+        # Evidence collection must never turn a reconstruction into a failure.
+        environment={'status':'unknown','reason':'environment_probe_failed'}
     for node in ir['nodes']:
         if node['type']=='text':
-            estimate=estimate_text(pixels,{'id':node['id'],'text':node['text'],'bbox':node.get('source_text_bbox',node['bbox'])},
-                                   **({'isolate_ocr_window':True} if source_typography else {}))
+            try:
+                estimate=estimate_text(pixels,{'id':node['id'],'text':node['text'],'bbox':node.get('source_text_bbox',node['bbox'])},
+                                       **({'isolate_ocr_window':True} if source_typography else {}))
+            except (OSError,ValueError) as error:
+                # A broken font volume is a deployment fact, not a bad proposal.
+                # Keep measuring fills and visible glyph colour where possible.
+                estimate={'native_eligible':False,
+                          'diagnostics':{'status':'REVIEW_REQUIRED',
+                                         'reason':'font_environment_unavailable',
+                                         'font_environment_error':type(error).__name__}}
             if source_typography and estimate.get('native_eligible'):
                 fontdiag=estimate['diagnostics']['font']
                 if fontdiag.get('dimension_error',0)>.12 or fontdiag.get('shape_overlap',1)<.58:
@@ -245,7 +261,7 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
                         for run in node.get('runs',[]):run['color']=node['color']
                         row['source_color_applied']=True
                         row['source_color_basis']='typography_estimate'
-                    elif row['reason'] in ('font_or_ocr_shape_mismatch','strict_source_font_fit_refused','no_usable_installed_font','non_smooth_or_crossing_background'):
+                    elif row['reason'] in ('font_or_ocr_shape_mismatch','strict_source_font_fit_refused','no_usable_installed_font','non_smooth_or_crossing_background','font_environment_unavailable'):
                         # A gradient panel defeats the typography estimate's
                         # smooth-background assumption, but it does not hide the
                         # glyphs. Measure them, and repair a proposal that
@@ -291,7 +307,7 @@ def calibrate_elements(irfile,output,*,source_typography=False,renderer_version=
         authoring['model_typography']={}
         authoring['applied_source_typography']={n['id']:{k:deepcopy(n[k]) for k in ('font','bold','color','bbox')} for n in ir['nodes'] if n['type']=='text' and any(r['id']==n['id'] and r['applied'] for r in diagnostics)}
     authoring['tool']='supervised-elements source-pixel calibration';authoring['ir_sha256']=digest(output/'slideir.json');authoring['review_notes']=ir['review_notes'];write_json(output/'authoring.json',authoring)
-    report={'schema':'ElementCalibration/1','source_sha256':ir['source_sha256'],'input_ir_sha256':digest(irfile),'output_ir_sha256':digest(output/'slideir.json'),'typography_applied':measured,'source_color_only_applied':sum(bool(r.get('source_color_applied')) for r in diagnostics),'typography_total':sum(n['type']=='text' for n in ir['nodes']),'solid_fills_applied':fills,'geometry_tightened':tightened_count,'diagnostics':diagnostics,'human_acceptance':False}
+    report={'schema':'ElementCalibration/1','source_sha256':ir['source_sha256'],'input_ir_sha256':digest(irfile),'output_ir_sha256':digest(output/'slideir.json'),'typography_applied':measured,'source_color_only_applied':sum(bool(r.get('source_color_applied')) for r in diagnostics),'typography_total':sum(n['type']=='text' for n in ir['nodes']),'solid_fills_applied':fills,'geometry_tightened':tightened_count,'environment':environment,'policies':policies,'diagnostics':diagnostics,'human_acceptance':False}
     write_json(output/'calibration.json',report)
     return {k:v for k,v in report.items() if k!='diagnostics'}
 
