@@ -1,6 +1,7 @@
 import json
 from copy import deepcopy
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 from image2ppt_vision.element_calibration import (
     _fill, _fill_decision, _fill_measured, _ink, _ink_measured, _tighten,
@@ -446,6 +447,20 @@ def test_geometry_policy_diagnostic_keeps_proposal_bbox(tmp_path, monkeypatch):
     assert calibrated["bbox"] == [10, 10, 60, 20]
     assert "geometry" not in row["applied_fields"]
     assert calibrated["font"]["ea"] == "MeasuredFont"
+
+
+@pytest.mark.parametrize("measured,applied", [("#F0F0F0", True), ("#F8F8F8", False)])
+def test_colour_only_respects_drift_floor(tmp_path, monkeypatch, measured, applied):
+    node = _policy_node()
+    report, row, calibrated, _ = _run_policy(
+        tmp_path, monkeypatch, node, _eligible_estimate(color=measured),
+        source_typography=True, typography_policy="color")
+    assert bool(row.get("source_color_applied")) is applied
+    if applied:
+        assert calibrated["color"] == measured.lstrip("#")
+    else:
+        assert row["source_color_refused_reason"] == "declared_color_matches_source"
+        assert calibrated["color"] == "FFFFFF"
 
 
 def test_legacy_boolean_still_maps_to_full_policy(tmp_path, monkeypatch):

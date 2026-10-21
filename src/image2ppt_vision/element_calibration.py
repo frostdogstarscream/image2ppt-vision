@@ -595,6 +595,9 @@ def _apply_typography(node, estimate, row, *, geometry_policy, source_size, targ
 COLOUR_FALLBACK_REASONS = ('font_or_ocr_shape_mismatch', 'strict_source_font_fit_refused',
                            'no_usable_installed_font', 'non_smooth_or_crossing_background',
                            'font_environment_unavailable')
+# Mean per-channel drift that is large enough to be a real colour change rather
+# than raster noise. The old fallback applied every measured colour.
+COLOUR_ONLY_MIN_DRIFT = 12.0
 
 
 def _apply_colour_only(node, estimate, row, pixels, box, policies):
@@ -614,7 +617,7 @@ def _apply_colour_only(node, estimate, row, pixels, box, policies):
             (ink_diagnostics or {}).get('reason') or 'no_glyph_colour_evidence')
         return False
     drift = _colour_drift(node, colour)
-    if drift is None or drift > 30:
+    if drift is None or drift > COLOUR_ONLY_MIN_DRIFT:
         _set_source_colour(node, colour, row, basis)
         if drift is not None:
             row['declared_color_drift'] = round(drift, 1)
