@@ -280,6 +280,10 @@ def _raster(text, font):
 FONT_SUPERSAMPLE = 4
 FONT_FINE_STEP = .25
 FONT_FINE_RADIUS = 1.0
+# Keep the fine search inside the strict source-font gate: a higher dice score
+# at a materially worse width/height ratio must not turn an accepted line into
+# a refused one.
+FONT_STRICT_DIMENSION_LIMIT = .12
 
 
 def _raster_fractional(text, path, size, index=0, supersample=FONT_SUPERSAMPLE):
@@ -447,11 +451,13 @@ def _fit_font(text, ink, candidates):
                     for fit in fine_sizes})
     subpixel_effective = distinct > 1
     fits.sort(key=lambda f: (f["loss"], f["path"], f["size"]))
-    best = fits[0]
-    if not subpixel_effective:
-        # Identical rasters mean the fine grid adds no evidence; be honest and
-        # keep the coarse integer result.
-        best = coarse_best
+    best_fine = next((fit for fit in fits if fit.get("fine")), None)
+    best = coarse_best
+    if (subpixel_effective and best_fine is not None and
+            best_fine["loss"] < coarse_best["loss"] - 1e-9 and
+            best_fine["dimension_error"] <= max(coarse_best["dimension_error"],
+                                                FONT_STRICT_DIMENSION_LIMIT) + 1e-9):
+        best = best_fine
     different_family = next((f for f in fits if f["family"] != best["family"]), None)
     best["family_margin"] = (different_family["loss"] - best["loss"]) if different_family else None
     best["size_search"] = {

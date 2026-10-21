@@ -10,7 +10,8 @@ import cv2
 import numpy as np
 from PIL import Image
 from .storage import read_json,write_json,digest
-from .typography import estimate_text, _background, _component_colors
+from .typography import (estimate_text, _background, _component_colors,
+                         FONT_STRICT_DIMENSION_LIMIT)
 from .renderer_calibration import origin_correction
 from .environment import collect_environment, policy_flags
 
@@ -467,7 +468,8 @@ def _tighten(pixels,node,nodes):
     return None
 
 
-TYPOGRAPHY_THRESHOLDS = {'shape_overlap': .58, 'dimension_error': .12}
+TYPOGRAPHY_THRESHOLDS = {'shape_overlap': .58,
+                         'dimension_error': FONT_STRICT_DIMENSION_LIMIT}
 POLICY_LEVELS = ('diagnostic', 'color', 'typography')
 GEOMETRY_POLICIES = ('diagnostic', 'measured')
 
