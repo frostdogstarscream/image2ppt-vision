@@ -253,51 +253,51 @@ def _fill_measured(pixels,node,nodes):
         selected=np.max(np.abs(series-design@coef),axis=1)<10
         if selected.sum()<len(series)*.2:break
         coef=np.linalg.lstsq(design[selected],series[selected],rcond=None)[0]
-    if np.isfinite(coef).all():
-            # A two-stop plane may be a poor fit on a piecewise ramp; the
-            # multi-stop branch below gets a chance before the projection guard.
-            axis=0 if np.linalg.norm(coef[1])>=np.linalg.norm(coef[2]) else 1
-            if axis==0:first,last,angle=coef[0]+coef[2]*.5,coef[0]+coef[1]+coef[2]*.5,0
-            else:first,last,angle=coef[0]+coef[1]*.5,coef[0]+coef[2]+coef[1]*.5,90
-            # Projection is an extra approximation: measure it before claiming it.
-            axis_position=measurement['u'] if axis==0 else measurement['v']
-            projected=first+(last-first)*axis_position[:,None]
-            residual=np.max(np.abs(series-projected),axis=1)
-            projection={'mean':round(float(residual.mean()),3),
-                        'p95':round(float(np.percentile(residual,95)),3),
-                        'fraction_over_12':round(float((residual>12).mean()),4)}
-            two_stop_ok=(projection['mean']<=12 and projection['p95']<=24 and
-                         projection['fraction_over_12']<=.35)
-            if not two_stop_ok and policy_flags()['multi_stop_gradient']:
-                multi=_multi_stop_fit(axis_position,series)
-                if multi is not None:
-                    knots,colors,projection=multi
-                    stops=[{'offset':round(float(knot)*100000),'color':_hx(color)}
-                           for knot,color in zip(knots,colors)]
-                    measurement['projection']=projection
-                    fit={'color':_hx(colors[0]),'sample_pixels':len(values),
-                         'dominant_fraction':round(float(selected.mean()),4),
-                         'angle_deg':angle,'projection':projection,
-                         'stop_count':len(stops),
-                         'gradient':{'angle_deg':angle,'stops':stops}}
-                    return fit,measurement
+    error=np.max(np.abs(series-design@coef),axis=1)
+    axis=0 if np.linalg.norm(coef[1])>=np.linalg.norm(coef[2]) else 1
+    if axis==0:
+        first,last,angle=coef[0]+coef[2]*.5,coef[0]+coef[1]+coef[2]*.5,0
+    else:
+        first,last,angle=coef[0]+coef[1]*.5,coef[0]+coef[2]+coef[1]*.5,90
+    axis_position=measurement['u'] if axis==0 else measurement['v']
+    projected=first+(last-first)*axis_position[:,None]
+    residual=np.max(np.abs(series-projected),axis=1)
+    projection={'mean':round(float(residual.mean()),3),
+                'p95':round(float(np.percentile(residual,95)),3),
+                'fraction_over_12':round(float((residual>12).mean()),4)}
+    two_stop_ok=(projection['mean']<=12 and projection['p95']<=24 and
+                 projection['fraction_over_12']<=.35)
+    # A piecewise ramp can defeat a two-stop plane. Try the multi-stop fit
+    # before the plane gate; its per-band coherence guard rejects glyph texture.
+    if not two_stop_ok and policy_flags()['multi_stop_gradient']:
+        multi=_multi_stop_fit(axis_position,series)
+        if multi is not None:
+            knots,colors,projection=multi
+            stops=[{'offset':round(float(knot)*100000),'color':_hx(color)}
+                   for knot,color in zip(knots,colors)]
             measurement['projection']=projection
-            if (policy_flags()['fill_projection_guard'] and not two_stop_ok):
-                measurement['projection_rejected']=projection
-                # A failed projection is not evidence for the weak flat reading;
-                # only a strong flat survives as an honest fallback.
-                return flat,measurement
-            fit={'color':_hx(first),'sample_pixels':len(values),'dominant_fraction':round(float(selected.mean()),4),'angle_deg':angle,
-                 'projection':projection,'stop_count':2}
-            if np.max(np.abs(first-last))>4:
-                fit['gradient']={'angle_deg':angle,'stops':[{'offset':0,'color':_hx(first)},{'offset':100000,'color':_hx(last)}]}
-            elif flat is not None:
-                return flat,measurement
-            return fit,measurement
-    # A declared gradient is a claim, not a constraint. When no plane fits,
-    # the flat reading is the honest fallback for a bar that is nearly one
-    # colour with texture the plane cannot capture.
-    return (flat or weak),measurement
+            return {'color':_hx(colors[0]),'sample_pixels':len(values),
+                    'dominant_fraction':round(float(selected.mean()),4),
+                    'angle_deg':angle,'projection':projection,
+                    'stop_count':len(stops),
+                    'gradient':{'angle_deg':angle,'stops':stops}},measurement
+    measurement['projection']=projection
+    if policy_flags()['fill_projection_guard'] and not two_stop_ok:
+        measurement['projection_rejected']=projection
+        # A failed projection is not evidence for the weak flat reading;
+        # only a strong flat survives as an honest fallback.
+        return flat,measurement
+    if np.percentile(error,95)>60:
+        return (flat or weak),measurement
+    fit={'color':_hx(first),'sample_pixels':len(values),
+         'dominant_fraction':round(float(selected.mean()),4),'angle_deg':angle,
+         'projection':projection,'stop_count':2}
+    if np.max(np.abs(first-last))>4:
+        fit['gradient']={'angle_deg':angle,'stops':[{'offset':0,'color':_hx(first)},
+                                                    {'offset':100000,'color':_hx(last)}]}
+    elif flat is not None:
+        return flat,measurement
+    return fit,measurement
 
 
 def _fill(pixels,node,nodes):
@@ -361,6 +361,15 @@ def _multi_stop_fit(axis_position,series,max_stops=6):
     """Fit a piecewise-linear ramp when a two-stop projection is insufficient."""
     t=np.asarray(axis_position,float);s=np.asarray(series,float)
     order=np.argsort(t);t=t[order];s=s[order]
+    coherence=[]
+    for index in range(24):
+        band=(t>=index/24)&(t<(index+1)/24)
+        if band.sum()<5:continue
+        median=np.median(s[band],axis=0)
+        coherence.append(float((np.max(np.abs(s[band]-median),axis=1)<=24).mean()))
+    coherence=float(np.median(coherence)) if coherence else 0.0
+    if coherence<.85:
+        return None
     for count in range(3,max_stops+1):
         knots=np.linspace(0,1,count);half=.5/(count-1);colors=[]
         minimum=max(8,len(t)//(count*4))
@@ -375,11 +384,17 @@ def _multi_stop_fit(axis_position,series,max_stops=6):
         if float(np.max(np.ptp(colors,axis=0)))<=4:continue
         predicted=np.stack([np.interp(axis_position,knots,colors[:,channel]) for channel in range(3)],axis=1)
         residual=np.max(np.abs(series-predicted),axis=1)
+        within_12=float((residual<=12).mean())
         projection={'mean':round(float(residual.mean()),3),
                     'p95':round(float(np.percentile(residual,95)),3),
                     'fraction_over_12':round(float((residual>12).mean()),4),
+                    'within_12':round(within_12,4),
+                    'axis_coherence':round(coherence,4),
                     'stops':count}
-        if projection['mean']<=12 and projection['p95']<=24 and projection['fraction_over_12']<=.35:
+        # The coherence gate above rejects glyph/decor texture; the residual
+        # gate is the same one used for a two-stop ramp.
+        if (projection['mean']<=12 and projection['p95']<=24 and
+                projection['fraction_over_12']<=.35):
             return knots,colors,projection
     return None
 
